@@ -40,6 +40,7 @@ io.on("connection", (socket) => {
 
   if (type === "driver") {
     socket.join(`driver:${id}`);
+    socket.join("drivers"); // All drivers join a shared room
   } else if (type === "user") {
     socket.join(`user:${id}`);
   }
@@ -60,7 +61,7 @@ io.on("connection", (socket) => {
     });
     
     // Broadcast to all drivers (in a real app, you'd filter by location)
-    socket.to("driver:*").emit("new_ride_request", {
+    io.to("drivers").emit("new_ride_request", {
       rideId: rideId,
       pickup: data.pickup,
       drop: data.drop,
