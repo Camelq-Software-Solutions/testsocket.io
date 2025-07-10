@@ -12,6 +12,9 @@ const activeRides = new Map();
 const connectedDrivers = new Map();
 const connectedUsers = new Map();
 
+// Add a Set to track locked rides
+const rideLocks = new Set();
+
 const io = new Server({
   cors: {
     origin: "*", // allow all origins for dev; restrict in prod
@@ -110,20 +113,28 @@ io.on("connection", (socket) => {
   // Handle driver ride acceptance/rejection
   socket.on("ride_response", (data) => {
     console.log("🚗 Driver ride response:", data);
-    
+
     const ride = activeRides.get(data.rideId);
     if (!ride) {
       socket.emit("error", { message: "Ride not found" });
       return;
     }
-    
+
+    // Locking logic to prevent race conditions
     if (data.response === "accept") {
+      if (rideLocks.has(data.rideId)) {
+        socket.emit("ride_response_error", {
+          message: "Ride is being processed by another driver. Please try another ride."
+        });
+        return;
+      }
+      rideLocks.add(data.rideId);
       // Check if ride is still available
       if (ride.status === "pending") {
         ride.status = "accepted";
         ride.acceptedBy = data.driverId;
         ride.driverId = data.driverId;
-        
+
         // Notify user
         io.to(`user:${ride.userId}`).emit("ride_accepted", {
           rideId: data.rideId,
@@ -132,19 +143,21 @@ io.on("connection", (socket) => {
           driverPhone: data.driverPhone,
           estimatedArrival: data.estimatedArrival
         });
-        
+
         // Notify all drivers that ride is taken
         io.to("drivers").emit("ride_taken", {
           rideId: data.rideId,
           driverId: data.driverId
         });
-        
+
         console.log(`✅ Ride ${data.rideId} accepted by driver ${data.driverId}`);
       } else {
         socket.emit("ride_response_error", {
           message: "Ride already accepted by another driver"
         });
       }
+      // Remove lock after processing
+      rideLocks.delete(data.rideId);
     } else if (data.response === "reject") {
       // Log rejection (could be used for analytics)
       console.log(`❌ Driver ${data.driverId} rejected ride ${data.rideId}`);
@@ -245,9 +258,11 @@ io.on("connection", (socket) => {
     
     // Clean up connections
     if (type === "driver") {
+      socket.leave("drivers");
       connectedDrivers.delete(id);
       console.log(`🚗 Driver ${id} disconnected. Total drivers: ${connectedDrivers.size}`);
     } else if (type === "user") {
+      socket.leave(`user:${id}`);
       connectedUsers.delete(id);
       console.log(`👤 User ${id} disconnected. Total users: ${connectedUsers.size}`);
     }
