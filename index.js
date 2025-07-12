@@ -155,6 +155,23 @@ io.on("connection", (socket) => {
           estimatedArrival: data.estimatedArrival
         });
 
+        // Send complete ride details to the accepting driver
+        console.log(`📢 Emitting ride_accepted_with_details to driver:${data.driverId}`);
+        socket.emit("ride_accepted_with_details", {
+          rideId: data.rideId,
+          userId: ride.userId,
+          pickup: ride.pickup,
+          drop: ride.drop,
+          rideType: ride.rideType,
+          price: ride.price,
+          driverId: data.driverId,
+          driverName: data.driverName,
+          driverPhone: data.driverPhone,
+          estimatedArrival: data.estimatedArrival,
+          status: ride.status,
+          createdAt: ride.createdAt
+        });
+
         // Notify all drivers that ride is taken
         io.to("drivers").emit("ride_taken", {
           rideId: data.rideId,
