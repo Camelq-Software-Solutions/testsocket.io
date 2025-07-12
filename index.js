@@ -157,11 +157,26 @@ io.on("connection", (socket) => {
 
         // Send complete ride details to the accepting driver
         console.log(`📢 Emitting ride_accepted_with_details to driver:${data.driverId}`);
+        // Ensure pickup and drop have address and name
+        const safePickup = {
+          latitude: ride.pickup.latitude,
+          longitude: ride.pickup.longitude,
+          address: ride.pickup.address || ride.pickup.name || 'Unknown Address',
+          name: ride.pickup.name || ride.pickup.address || 'Unknown Name',
+        };
+        const safeDrop = {
+          id: ride.drop.id,
+          name: ride.drop.name || ride.drop.address || 'Unknown Name',
+          address: ride.drop.address || ride.drop.name || 'Unknown Address',
+          latitude: ride.drop.latitude,
+          longitude: ride.drop.longitude,
+          type: ride.drop.type || '',
+        };
         socket.emit("ride_accepted_with_details", {
           rideId: data.rideId,
           userId: ride.userId,
-          pickup: ride.pickup,
-          drop: ride.drop,
+          pickup: safePickup,
+          drop: safeDrop,
           rideType: ride.rideType,
           price: ride.price,
           driverId: data.driverId,
