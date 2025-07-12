@@ -1,0 +1,13 @@
+{
+  "name": "socket-test-scripts",
+  "version": "1.0.0",
+  "description": "Test scripts for socket.io ride booking",
+  "main": "index.js",
+  "scripts": {
+    "test-user": "node test_user_book.js",
+    "test-driver": "node test_driver_accept.js"
+  },
+  "dependencies": {
+    "socket.io-client": "^4.7.2"
+  }
+} 

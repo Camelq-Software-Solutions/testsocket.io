@@ -63,7 +63,7 @@ io.on("connection", (socket) => {
       status: "online",
       lastSeen: Date.now()
     });
-    console.log(`👤 User ${id} connected. Total users: ${connectedUsers.size}`);
+    console.log(`👤 User ${id} connected and joined room user:${id}. Total users: ${connectedUsers.size}`);
   }
 
   // Handle ride booking
@@ -89,6 +89,7 @@ io.on("connection", (socket) => {
     activeRides.set(rideId, rideData);
     
     // Emit back to the user that ride is booked
+    console.log(`📤 Emitting ride_booked to user ${data.userId} with rideId: ${rideId}`);
     socket.emit("ride_booked", {
       success: true,
       rideId: rideId,
@@ -136,7 +137,17 @@ io.on("connection", (socket) => {
         ride.driverId = data.driverId;
 
         // Notify user
+        console.log(`📢 Emitting ride_accepted to user:${ride.userId}`);
         io.to(`user:${ride.userId}`).emit("ride_accepted", {
+          rideId: data.rideId,
+          driverId: data.driverId,
+          driverName: data.driverName,
+          driverPhone: data.driverPhone,
+          estimatedArrival: data.estimatedArrival
+        });
+        
+        // Also emit to all users as backup (for testing)
+        io.emit("ride_accepted", {
           rideId: data.rideId,
           driverId: data.driverId,
           driverName: data.driverName,
