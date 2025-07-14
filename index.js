@@ -167,15 +167,6 @@ io.on("connection", (socket) => {
           driverPhone: data.driverPhone,
           estimatedArrival: data.estimatedArrival
         });
-        
-        // Also emit to all users as backup (for testing)
-        io.emit("ride_accepted", {
-          rideId: data.rideId,
-          driverId: data.driverId,
-          driverName: data.driverName,
-          driverPhone: data.driverPhone,
-          estimatedArrival: data.estimatedArrival
-        });
 
         // Send complete ride details to the accepting driver
         console.log(`📢 Emitting ride_accepted_with_details to driver:${data.driverId}`);
