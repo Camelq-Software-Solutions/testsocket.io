@@ -15,6 +15,9 @@ const connectedUsers = new Map();
 // Add a Set to track locked rides
 const rideLocks = new Set();
 
+// Track which drivers have already received each ride request
+const rideRequestRecipients = new Map();
+
 const io = new Server({
   cors: {
     origin: "*", // allow all origins for dev; restrict in prod
@@ -97,6 +100,10 @@ io.on("connection", (socket) => {
       message: "Ride booked successfully! Searching for drivers..."
     });
     
+    // Track which drivers will receive this request
+    const driverIds = Array.from(connectedDrivers.keys());
+    rideRequestRecipients.set(rideId, new Set(driverIds));
+    
     // Broadcast to all drivers
     io.to("drivers").emit("new_ride_request", {
       rideId: rideId,
@@ -108,7 +115,22 @@ io.on("connection", (socket) => {
       timestamp: Date.now()
     });
     
-    console.log(`📢 Ride request ${rideId} broadcasted to ${connectedDrivers.size} drivers`);
+    console.log(`📢 Ride request ${rideId} broadcasted to ${connectedDrivers.size} drivers:`, driverIds);
+    
+    // Set a timeout to clean up the ride request if no one accepts it
+    setTimeout(() => {
+      if (activeRides.has(rideId) && activeRides.get(rideId).status === "pending") {
+        console.log(`⏰ Ride request ${rideId} timed out, cleaning up`);
+        activeRides.delete(rideId);
+        rideRequestRecipients.delete(rideId);
+        
+        // Notify user that no drivers were found
+        io.to(`user:${data.userId}`).emit("ride_timeout", {
+          rideId: rideId,
+          message: "No drivers found. Please try again."
+        });
+      }
+    }, 60000); // 1 minute timeout
   });
 
   // Handle driver ride acceptance/rejection
@@ -193,6 +215,9 @@ io.on("connection", (socket) => {
           driverId: data.driverId
         });
 
+        // Clean up ride request tracking
+        rideRequestRecipients.delete(data.rideId);
+
         console.log(`✅ Ride ${data.rideId} accepted by driver ${data.driverId}`);
       } else {
         socket.emit("ride_response_error", {
@@ -208,6 +233,15 @@ io.on("connection", (socket) => {
         rideId: data.rideId,
         response: "rejected"
       });
+      
+      // Remove this driver from the recipients list for this ride
+      const recipients = rideRequestRecipients.get(data.rideId);
+      if (recipients) {
+        recipients.delete(data.driverId);
+        if (recipients.size === 0) {
+          rideRequestRecipients.delete(data.rideId);
+        }
+      }
     }
   });
 
@@ -254,6 +288,7 @@ io.on("connection", (socket) => {
       // If ride is completed or cancelled, clean up
       if (data.status === "completed" || data.status === "cancelled") {
         activeRides.delete(data.rideId);
+        rideRequestRecipients.delete(data.rideId);
         console.log(`🧹 Cleaned up ride ${data.rideId}`);
       }
     }
@@ -303,6 +338,15 @@ io.on("connection", (socket) => {
     if (type === "driver") {
       socket.leave("drivers");
       connectedDrivers.delete(id);
+      
+      // Remove this driver from all ride request recipients
+      for (const [rideId, recipients] of rideRequestRecipients.entries()) {
+        recipients.delete(id);
+        if (recipients.size === 0) {
+          rideRequestRecipients.delete(rideId);
+        }
+      }
+      
       console.log(`🚗 Driver ${id} disconnected. Total drivers: ${connectedDrivers.size}`);
     } else if (type === "user") {
       socket.leave(`user:${id}`);
