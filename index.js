@@ -199,6 +199,21 @@ app.use((req, res, next) => {
   next();
 });
 
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    connections: {
+      users: connectedUsers.size,
+      drivers: connectedDrivers.size,
+      activeRides: activeRides.size
+    }
+  });
+});
+
 // Debug endpoint
 app.get('/debug/sockets', (req, res) => {
   const debugInfo = {
@@ -224,8 +239,9 @@ app.get('/debug/sockets', (req, res) => {
 const io = new Server({
   cors: {
     origin: "*",
-    methods: ["GET", "POST"],
-    credentials: true
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    credentials: true,
+    allowedHeaders: ["Content-Type", "Authorization", "Access-Control-Allow-Origin"]
   },
   allowEIO3: true,
   transports: ["websocket", "polling"],
@@ -233,6 +249,12 @@ const io = new Server({
   serveClient: false,
   pingTimeout: 60000,
   pingInterval: 25000,
+  connectTimeout: 45000,
+  maxHttpBufferSize: 1e8,
+  allowRequest: (req, callback) => {
+    // Allow all requests for now
+    callback(null, true);
+  }
 });
 
 logEvent('SERVER_START', { port: PORT });
@@ -810,7 +832,11 @@ io.on("connection", (socket) => {
   });
 });
 
+// Create HTTP server and attach Socket.IO
+const server = require('http').createServer(app);
+io.attach(server);
+
 // Start the server
-app.listen(PORT, () => {
+server.listen(PORT, () => {
   logEvent('SERVER_LISTENING', { port: PORT });
 });
