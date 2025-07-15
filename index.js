@@ -49,7 +49,7 @@ const isValidStateTransition = (fromState, toState) => {
   return validTransitions[fromState]?.includes(toState) || false;
 };
 
-// Helper function to validate ride data
+// Helper function to validate ride dataaaaa
 const validateRideData = (data) => {
   const required = ['pickup', 'drop', 'rideType', 'price', 'userId'];
   const missing = required.filter(field => !data[field]);
