@@ -98,6 +98,24 @@ io.on("connection", (socket) => {
       location: null
     });
     console.log(`🚗 Driver ${id} connected. Total drivers: ${connectedDrivers.size}`);
+    
+    // Send only active (pending) ride requests to newly connected driver
+    const activeRideRequests = Array.from(activeRides.entries())
+      .filter(([rideId, ride]) => ride.status === "pending")
+      .map(([rideId, ride]) => ({
+        rideId: rideId,
+        pickup: ride.pickup,
+        drop: ride.drop,
+        rideType: ride.rideType,
+        price: ride.price,
+        userId: ride.userId,
+        timestamp: ride.createdAt
+      }));
+    
+    if (activeRideRequests.length > 0) {
+      console.log(`📢 Sending ${activeRideRequests.length} active ride requests to newly connected driver ${id}`);
+      socket.emit("active_ride_requests", activeRideRequests);
+    }
   } else if (type === "user") {
     socket.join(`user:${id}`);
     connectedUsers.set(id, {
@@ -157,11 +175,11 @@ io.on("connection", (socket) => {
       message: "Ride booked successfully! Searching for drivers..."
     });
     
-    // Track which drivers will receive this request
-    const driverIds = Array.from(connectedDrivers.keys());
-    rideRequestRecipients.set(rideId, new Set(driverIds));
+    // Only send to currently connected drivers (not future drivers)
+    const currentDriverIds = Array.from(connectedDrivers.keys());
+    rideRequestRecipients.set(rideId, new Set(currentDriverIds));
     
-    // Broadcast to all drivers
+    // Broadcast to currently connected drivers only
     const rideRequest = {
       rideId: rideId,
       pickup: data.pickup,
@@ -172,9 +190,12 @@ io.on("connection", (socket) => {
       timestamp: Date.now()
     };
     
-    io.to("drivers").emit("new_ride_request", rideRequest);
-    
-    console.log(`📢 Ride request ${rideId} broadcasted to ${connectedDrivers.size} drivers:`, driverIds);
+    if (currentDriverIds.length > 0) {
+      io.to("drivers").emit("new_ride_request", rideRequest);
+      console.log(`📢 Ride request ${rideId} broadcasted to ${currentDriverIds.length} currently connected drivers:`, currentDriverIds);
+    } else {
+      console.log(`⚠️ No drivers currently connected. Ride request ${rideId} will be sent when drivers connect.`);
+    }
     
     // Set a timeout to clean up the ride request if no one accepts it
     setTimeout(() => {
@@ -193,6 +214,21 @@ io.on("connection", (socket) => {
         });
       }
     }, 60000); // 1 minute timeout
+
+    // Additional cleanup: Remove ride requests older than 5 minutes
+    setTimeout(() => {
+      const ride = activeRides.get(rideId);
+      if (ride && ride.status === "pending") {
+        const age = Date.now() - ride.createdAt;
+        if (age > 300000) { // 5 minutes
+          console.log(`🧹 Cleaning up old ride request ${rideId} (age: ${Math.round(age/1000)}s)`);
+          logRideEvent('CLEANUP', rideId, { age: Math.round(age/1000) });
+          
+          activeRides.delete(rideId);
+          rideRequestRecipients.delete(rideId);
+        }
+      }
+    }, 300000); // 5 minutes
   });
 
   // Handle driver ride acceptance/rejection
