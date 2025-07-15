@@ -87,6 +87,20 @@ const logRideEvent = (event, rideId, data = {}) => {
   });
 };
 
+// Helper function to get user type display name
+const getUserTypeDisplay = (type) => {
+  switch (type) {
+    case 'customer':
+      return 'Customer';
+    case 'user':
+      return 'Customer';
+    case 'driver':
+      return 'Driver';
+    default:
+      return type;
+  }
+};
+
 io.on("connection", (socket) => {
   // Log socket id and handshake details
   console.log("🔗 New connection:", {
@@ -100,7 +114,8 @@ io.on("connection", (socket) => {
   });
 
   const { type, id } = socket.handshake.query;
-  console.log(`🟢 Client connected: type=${type}, id=${id}`);
+  const userTypeDisplay = getUserTypeDisplay(type);
+  console.log(`🟢 ${userTypeDisplay} connected: type=${type}, id=${id}`);
 
   // Store connection info
   if (type === "driver") {
@@ -138,7 +153,7 @@ io.on("connection", (socket) => {
       status: "online",
       lastSeen: Date.now()
     });
-    console.log(`👤 User ${id} connected and joined room user:${id}. Total users: ${connectedUsers.size}`);
+    console.log(`👤 ${userTypeDisplay} ${id} connected and joined room user:${id}. Total users: ${connectedUsers.size}`);
     
     // Verify room joining
     const userRoom = io.sockets.adapter.rooms.get(`user:${id}`);
@@ -299,9 +314,9 @@ io.on("connection", (socket) => {
         const notificationData = {
           rideId: data.rideId,
           driverId: data.driverId,
-          driverName: data.driverName,
-          driverPhone: data.driverPhone,
-          estimatedArrival: data.estimatedArrival
+          driverName: data.driverName || "Driver",
+          driverPhone: data.driverPhone || "+1234567890",
+          estimatedArrival: data.estimatedArrival || "5 minutes"
         };
         console.log(`📤 Notification data being sent:`, JSON.stringify(notificationData, null, 2));
         io.to(`user:${ride.userId}`).emit("ride_accepted", notificationData);
@@ -323,7 +338,7 @@ io.on("connection", (socket) => {
           name: ride.pickup.name || ride.pickup.address || 'Unknown Name',
         };
         const safeDrop = {
-          id: ride.drop.id,
+          id: ride.drop.id || 'dest_1',
           name: ride.drop.name || ride.drop.address || 'Unknown Name',
           address: ride.drop.address || ride.drop.name || 'Unknown Address',
           latitude: ride.drop.latitude,
@@ -338,9 +353,9 @@ io.on("connection", (socket) => {
           rideType: ride.rideType,
           price: ride.price,
           driverId: data.driverId,
-          driverName: data.driverName,
-          driverPhone: data.driverPhone,
-          estimatedArrival: data.estimatedArrival,
+          driverName: data.driverName || "Driver",
+          driverPhone: data.driverPhone || "+1234567890",
+          estimatedArrival: data.estimatedArrival || "5 minutes",
           status: ride.status,
           createdAt: ride.createdAt
         });
@@ -516,7 +531,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("disconnect", () => {
-    console.log(`🔴 Client disconnected: type=${type}, id=${id}`);
+    console.log(`🔴 ${userTypeDisplay} disconnected: type=${type}, id=${id}`);
     
     // Clean up connections
     if (type === "driver") {
@@ -535,7 +550,7 @@ io.on("connection", (socket) => {
     } else if (type === "user" || type === "customer") {
       socket.leave(`user:${id}`);
       connectedUsers.delete(id);
-      console.log(`👤 User ${id} disconnected. Total users: ${connectedUsers.size}`);
+      console.log(`👤 ${userTypeDisplay} ${id} disconnected. Total users: ${connectedUsers.size}`);
     }
   });
 });
