@@ -909,6 +909,159 @@ io.on("connection", (socket) => {
   });
 });
 
+// ========================================
+// DEBUG ENDPOINTS
+// ========================================
+
+// Debug endpoint to clean up stuck rides
+app.post('/debug/cleanup-stuck-rides', (req, res) => {
+  logEvent('DEBUG_CLEANUP_REQUESTED');
+  
+  let cleanedCount = 0;
+  const now = Date.now();
+  
+  // Clean up all rides in accepted status (force cleanup for debugging)
+  for (const [rideId, ride] of activeRides.entries()) {
+    if (ride.status === RIDE_STATES.ACCEPTED) {
+      logEvent('DEBUG_CLEANUP_ACCEPTED_RIDE', { rideId, age: Math.round((now - ride.lastUpdated)/1000) });
+      
+      // Force complete the ride
+      updateRideState(rideId, RIDE_STATES.COMPLETED);
+      
+      // Notify user
+      io.to(`user:${ride.userId}`).emit("ride_completed", {
+        rideId: rideId,
+        message: "Ride auto-completed (debug cleanup)",
+        status: RIDE_STATES.COMPLETED,
+        timestamp: Date.now()
+      });
+      
+      // Notify driver if exists
+      if (ride.driverId) {
+        io.to(`driver:${ride.driverId}`).emit("ride_completed", {
+          rideId: rideId,
+          message: "Ride auto-completed (debug cleanup)",
+          status: RIDE_STATES.COMPLETED,
+          timestamp: Date.now()
+        });
+        resetDriverStatus(ride.driverId);
+      }
+      
+      cleanupRide(rideId, ride.userId);
+      cleanedCount++;
+    }
+  }
+  
+  // Clean up all rides in searching status (force cleanup for debugging)
+  for (const [rideId, ride] of activeRides.entries()) {
+    if (ride.status === RIDE_STATES.SEARCHING) {
+      logEvent('DEBUG_CLEANUP_SEARCHING_RIDE', { rideId, age: Math.round((now - ride.createdAt)/1000) });
+      
+      updateRideState(rideId, RIDE_STATES.EXPIRED);
+      
+      io.to(`user:${ride.userId}`).emit("ride_expired", {
+        rideId: rideId,
+        message: "Ride request expired (debug cleanup)"
+      });
+      
+      cleanupRide(rideId, ride.userId);
+      cleanedCount++;
+    }
+  }
+  
+  // Clean up all rides in arrived status (force cleanup for debugging)
+  for (const [rideId, ride] of activeRides.entries()) {
+    if (ride.status === RIDE_STATES.ARRIVED) {
+      logEvent('DEBUG_CLEANUP_ARRIVED_RIDE', { rideId, age: Math.round((now - ride.lastUpdated)/1000) });
+      
+      updateRideState(rideId, RIDE_STATES.COMPLETED);
+      
+      io.to(`user:${ride.userId}`).emit("ride_completed", {
+        rideId: rideId,
+        message: "Ride auto-completed (debug cleanup)",
+        status: RIDE_STATES.COMPLETED,
+        timestamp: Date.now()
+      });
+      
+      if (ride.driverId) {
+        io.to(`driver:${ride.driverId}`).emit("ride_completed", {
+          rideId: rideId,
+          message: "Ride auto-completed (debug cleanup)",
+          status: RIDE_STATES.COMPLETED,
+          timestamp: Date.now()
+        });
+        resetDriverStatus(ride.driverId);
+      }
+      
+      cleanupRide(rideId, ride.userId);
+      cleanedCount++;
+    }
+  }
+  
+  // Clean up all rides in started status (force cleanup for debugging)
+  for (const [rideId, ride] of activeRides.entries()) {
+    if (ride.status === RIDE_STATES.STARTED) {
+      logEvent('DEBUG_CLEANUP_STARTED_RIDE', { rideId, age: Math.round((now - ride.lastUpdated)/1000) });
+      
+      updateRideState(rideId, RIDE_STATES.COMPLETED);
+      
+      io.to(`user:${ride.userId}`).emit("ride_completed", {
+        rideId: rideId,
+        message: "Ride auto-completed (debug cleanup)",
+        status: RIDE_STATES.COMPLETED,
+        timestamp: Date.now()
+      });
+      
+      if (ride.driverId) {
+        io.to(`driver:${ride.driverId}`).emit("ride_completed", {
+          rideId: rideId,
+          message: "Ride auto-completed (debug cleanup)",
+          status: RIDE_STATES.COMPLETED,
+          timestamp: Date.now()
+        });
+        resetDriverStatus(ride.driverId);
+      }
+      
+      cleanupRide(rideId, ride.userId);
+      cleanedCount++;
+    }
+  }
+  
+  // Clear all user active rides
+  userActiveRides.clear();
+  
+  logEvent('DEBUG_CLEANUP_COMPLETE', { cleanedCount, remainingRides: activeRides.size });
+  
+  res.json({
+    success: true,
+    message: `Cleaned up ${cleanedCount} stuck rides`,
+    cleanedCount,
+    remainingRides: activeRides.size
+  });
+});
+
+// Debug endpoint to get current state
+app.get('/debug/state', (req, res) => {
+  const state = {
+    activeRides: Array.from(activeRides.entries()).map(([id, ride]) => ({
+      id,
+      status: ride.status,
+      userId: ride.userId,
+      driverId: ride.driverId,
+      createdAt: ride.createdAt,
+      lastUpdated: ride.lastUpdated,
+      age: Math.round((Date.now() - ride.createdAt) / 1000)
+    })),
+    connectedDrivers: connectedDrivers.size,
+    connectedUsers: connectedUsers.size,
+    userActiveRides: Array.from(userActiveRides.entries()),
+    rideLocks: Array.from(rideLocks),
+    rideRequestRecipients: Array.from(rideRequestRecipients.entries())
+  };
+  
+  res.json(state);
+});
+
 // Create HTTP server and attach Socket.IO
 const server = require('http').createServer(app);
 io.attach(server);
