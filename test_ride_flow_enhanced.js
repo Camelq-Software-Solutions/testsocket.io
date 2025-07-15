@@ -32,6 +32,10 @@ let testResults = {
   driver1DuplicateAttemptBlocked: false,
   userDuplicateBookingBlocked: false,
   
+  // Driver status tests
+  driver1MarkedBusy: false,
+  driver2CannotAcceptWhenBusy: false,
+  
   // Socket reconnection tests
   userReconnectionSuccessful: false,
   
@@ -172,6 +176,20 @@ driver1Socket.on('new_ride_request', (data) => {
 driver1Socket.on('ride_accepted_with_details', (data) => {
   console.log('✅ Driver 1 received acceptance confirmation:', data);
   testResults.driver1Accepted = true;
+  
+  // Test that driver 1 is now busy and cannot accept another ride
+  setTimeout(() => {
+    console.log('🧪 Testing that driver 1 is now busy and cannot accept another ride...');
+    // Try to accept another ride (should fail)
+    driver1Socket.emit('ride_response', {
+      rideId: 'test_ride_2',
+      response: 'accept',
+      driverId: TEST_DRIVER_ID_1,
+      driverName: 'Test Driver 1',
+      driverPhone: '+1234567890',
+      estimatedArrival: '5 minutes'
+    });
+  }, 1000);
 });
 
 driver1Socket.on('ride_response_error', (data) => {
@@ -179,6 +197,9 @@ driver1Socket.on('ride_response_error', (data) => {
   if (data.message.includes('already attempted to accept this ride')) {
     console.log('✅ Duplicate acceptance correctly blocked');
     testResults.driver1DuplicateAttemptBlocked = true;
+  } else if (data.message.includes('already busy with another ride')) {
+    console.log('✅ Driver 1 correctly blocked from accepting when busy');
+    testResults.driver1MarkedBusy = true;
   } else {
     testResults.errors.push(`Driver 1 error: ${data.message}`);
   }
@@ -211,10 +232,39 @@ driver2Socket.on('new_ride_request', (data) => {
 driver2Socket.on('ride_taken', (data) => {
   console.log('✅ Driver 2 received ride_taken notification:', data);
   testResults.driver2ReceivedTaken = true;
+  
+  // Test that driver 2 cannot accept another ride when driver 1 is busy
+  setTimeout(() => {
+    console.log('🧪 Testing that driver 2 cannot accept rides when driver 1 is busy...');
+    // Book another ride
+    userSocket.emit('book_ride', {
+      userId: TEST_USER_ID + '_2',
+      pickup: {
+        latitude: 17.444,
+        longitude: 78.382,
+        address: 'Test Pickup 2',
+        name: 'Test Pickup 2'
+      },
+      drop: {
+        id: 'test_drop_2',
+        name: 'Test Drop 2',
+        address: 'Test Drop Address 2',
+        latitude: 17.4418,
+        longitude: 78.38,
+        type: 'test'
+      },
+      rideType: 'Bike',
+      price: 60
+    });
+  }, 1000);
 });
 
 driver2Socket.on('ride_response_error', (data) => {
   console.log('❌ Driver 2 received error (expected):', data);
+  if (data.message.includes('already busy with another ride')) {
+    console.log('✅ Driver 2 correctly blocked from accepting when driver 1 is busy');
+    testResults.driver2CannotAcceptWhenBusy = true;
+  }
   // This error is expected for driver 2
 });
 
@@ -284,6 +334,11 @@ function runTestResults() {
   console.log('Driver 1 Duplicate Attempt Blocked:', testResults.driver1DuplicateAttemptBlocked ? '✅' : '❌');
   console.log('User Duplicate Booking Blocked:', testResults.userDuplicateBookingBlocked ? '✅' : '❌');
   
+  // Driver status tests
+  console.log('\n🚗 Driver Status Tests:');
+  console.log('Driver 1 Marked Busy After Acceptance:', testResults.driver1MarkedBusy ? '✅' : '❌');
+  console.log('Driver 2 Cannot Accept When Driver 1 Busy:', testResults.driver2CannotAcceptWhenBusy ? '✅' : '❌');
+  
   // Socket reconnection tests
   console.log('\n🔄 Socket Reconnection Tests:');
   console.log('User Reconnection Successful:', testResults.userReconnectionSuccessful ? '✅' : '❌');
@@ -305,6 +360,8 @@ function runTestResults() {
                    testResults.userReceivedAcceptance &&
                    testResults.driver1DuplicateAttemptBlocked &&
                    testResults.userDuplicateBookingBlocked &&
+                   testResults.driver1MarkedBusy &&
+                   testResults.driver2CannotAcceptWhenBusy &&
                    testResults.userReconnectionSuccessful;
   
   console.log('\n🎯 Overall Test Result:', allPassed ? '✅ PASSED' : '❌ FAILED');

@@ -213,21 +213,46 @@ io.on("connection", (socket) => {
     console.log(`🚗 Driver ${id} connected. Total drivers: ${connectedDrivers.size}`);
     
     // Send only active (pending) ride requests to newly connected driver
-    const activeRideRequests = Array.from(activeRides.entries())
-      .filter(([rideId, ride]) => ride.status === "pending")
-      .map(([rideId, ride]) => ({
-        rideId: rideId,
-        pickup: ride.pickup,
-        drop: ride.drop,
-        rideType: ride.rideType,
-        price: ride.price,
-        userId: ride.userId,
-        timestamp: ride.createdAt
-      }));
-    
-    if (activeRideRequests.length > 0) {
-      console.log(`📢 Sending ${activeRideRequests.length} active ride requests to newly connected driver ${id}`);
-      socket.emit("active_ride_requests", activeRideRequests);
+    // BUT only if the driver is not already busy with another ride
+    const driver = connectedDrivers.get(id);
+    if (driver && driver.status === "online") {
+      const activeRideRequests = Array.from(activeRides.entries())
+        .filter(([rideId, ride]) => {
+          // Only send rides that are pending
+          if (ride.status !== "pending") return false;
+          
+          // Check if this driver has already received this ride request
+          const recipients = rideRequestRecipients.get(rideId);
+          if (recipients && recipients.has(id)) {
+            console.log(`🚫 Driver ${id} already received ride request ${rideId}, skipping`);
+            return false;
+          }
+          
+          return true;
+        })
+        .map(([rideId, ride]) => ({
+          rideId: rideId,
+          pickup: ride.pickup,
+          drop: ride.drop,
+          rideType: ride.rideType,
+          price: ride.price,
+          userId: ride.userId,
+          timestamp: ride.createdAt
+        }));
+      
+      if (activeRideRequests.length > 0) {
+        console.log(`📢 Sending ${activeRideRequests.length} active ride requests to newly connected driver ${id}`);
+        socket.emit("active_ride_requests", activeRideRequests);
+        
+        // Add this driver to the recipients list for these rides
+        activeRideRequests.forEach(rideRequest => {
+          const recipients = rideRequestRecipients.get(rideRequest.rideId) || new Set();
+          recipients.add(id);
+          rideRequestRecipients.set(rideRequest.rideId, recipients);
+        });
+      }
+    } else {
+      console.log(`🚫 Driver ${id} is busy (status: ${driver?.status}), not sending ride requests`);
     }
   } else if (type === "user" || type === "customer") {
     socket.join(`user:${id}`);
@@ -313,7 +338,10 @@ io.on("connection", (socket) => {
     });
     
     // Only send to currently connected drivers (not future drivers)
-    const currentDriverIds = Array.from(connectedDrivers.keys());
+    const currentDriverIds = Array.from(connectedDrivers.entries())
+      .filter(([driverId, driver]) => driver.status === "online") // Only send to available drivers
+      .map(([driverId, driver]) => driverId);
+    
     rideRequestRecipients.set(rideId, new Set(currentDriverIds));
     
     // Broadcast to currently connected drivers only
@@ -329,9 +357,9 @@ io.on("connection", (socket) => {
     
     if (currentDriverIds.length > 0) {
       io.to("drivers").emit("new_ride_request", rideRequest);
-      console.log(`📢 Ride request ${rideId} broadcasted to ${currentDriverIds.length} currently connected drivers:`, currentDriverIds);
+      console.log(`📢 Ride request ${rideId} broadcasted to ${currentDriverIds.length} currently available drivers:`, currentDriverIds);
     } else {
-      console.log(`⚠️ No drivers currently connected. Ride request ${rideId} will be sent when drivers connect.`);
+      console.log(`⚠️ No available drivers currently connected. Ride request ${rideId} will be sent when drivers come online.`);
     }
     
     // Set a timeout to clean up the ride request if no one accepts it
@@ -387,6 +415,16 @@ io.on("connection", (socket) => {
 
     // Locking logic to prevent race conditions
     if (data.response === "accept") {
+      // Check if this driver is already busy with another ride
+      const driver = connectedDrivers.get(data.driverId);
+      if (driver && driver.status === "busy") {
+        console.log("🚫 Driver is already busy with another ride:", data.driverId);
+        socket.emit("ride_response_error", {
+          message: "You are already busy with another ride. Please complete your current ride first."
+        });
+        return;
+      }
+      
       // Check if this driver has already attempted to accept this ride
       const attempts = rideAcceptanceAttempts.get(data.rideId) || new Set();
       if (attempts.has(data.driverId)) {
@@ -452,6 +490,13 @@ io.on("connection", (socket) => {
           finalRide.acceptedBy = data.driverId;
           finalRide.driverId = data.driverId;
           finalRide.acceptedAt = Date.now();
+
+          // Mark the accepting driver as busy to prevent them from receiving other ride requests
+          const acceptingDriver = connectedDrivers.get(data.driverId);
+          if (acceptingDriver) {
+            acceptingDriver.status = "busy";
+            console.log(`🚫 Driver ${data.driverId} marked as busy after accepting ride ${data.rideId}`);
+          }
 
           logRideEvent('ACCEPTED', data.rideId, { 
             driverId: data.driverId,
@@ -675,8 +720,31 @@ io.on("connection", (socket) => {
     
     const driver = connectedDrivers.get(data.driverId);
     if (driver) {
+      const previousStatus = driver.status;
       driver.status = data.status; // "online", "busy", "offline"
       driver.lastSeen = Date.now();
+      
+      console.log(`🔄 Driver ${data.driverId} status changed from ${previousStatus} to ${data.status}`);
+      
+      // If driver becomes busy, remove them from all pending ride request recipients
+      if (data.status === "busy") {
+        console.log(`🚫 Driver ${data.driverId} is now busy, removing from all pending ride requests`);
+        for (const [rideId, recipients] of rideRequestRecipients.entries()) {
+          const ride = activeRides.get(rideId);
+          if (ride && ride.status === "pending") {
+            recipients.delete(data.driverId);
+            if (recipients.size === 0) {
+              rideRequestRecipients.delete(rideId);
+              console.log(`🧹 No more available drivers for ride ${rideId}, removing from recipients`);
+            }
+          }
+        }
+      }
+      
+      // If driver comes back online, they can receive new ride requests
+      if (data.status === "online" && previousStatus === "busy") {
+        console.log(`🟢 Driver ${data.driverId} is back online and available for new rides`);
+      }
       
       // Broadcast to users if needed
       if (data.status === "offline") {
@@ -687,6 +755,14 @@ io.on("connection", (socket) => {
               rideId: rideId,
               driverId: data.driverId
             });
+          }
+        }
+        
+        // Remove driver from all ride request recipients when they go offline
+        for (const [rideId, recipients] of rideRequestRecipients.entries()) {
+          recipients.delete(data.driverId);
+          if (recipients.size === 0) {
+            rideRequestRecipients.delete(rideId);
           }
         }
       }
