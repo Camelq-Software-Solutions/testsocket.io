@@ -163,6 +163,38 @@ setInterval(() => {
       cleanupRide(rideId, ride.userId);
       cleanedCount++;
     }
+    
+    // Clean up old accepted rides (older than 10 minutes) - these might be stuck
+    if (ride.status === RIDE_STATES.ACCEPTED && (now - ride.lastUpdated) > 600000) {
+      logEvent('CLEANUP_OLD_ACCEPTED_RIDE', { rideId, age: Math.round((now - ride.lastUpdated)/1000) });
+      
+      // Update state to completed (force completion)
+      updateRideState(rideId, RIDE_STATES.COMPLETED);
+      
+      // Notify user that ride was auto-completed
+      io.to(`user:${ride.userId}`).emit("ride_completed", {
+        rideId: rideId,
+        message: "Ride auto-completed due to inactivity",
+        status: RIDE_STATES.COMPLETED,
+        timestamp: Date.now()
+      });
+      
+      // Notify driver
+      if (ride.driverId) {
+        io.to(`driver:${ride.driverId}`).emit("ride_completed", {
+          rideId: rideId,
+          message: "Ride auto-completed due to inactivity",
+          status: RIDE_STATES.COMPLETED,
+          timestamp: Date.now()
+        });
+        
+        // Reset driver status
+        resetDriverStatus(ride.driverId);
+      }
+      
+      cleanupRide(rideId, ride.userId);
+      cleanedCount++;
+    }
   }
   
   // Clean up stale user active rides entries
@@ -234,6 +266,27 @@ app.get('/debug/sockets', (req, res) => {
     }))
   };
   res.json(debugInfo);
+});
+
+// Manual cleanup endpoint
+app.post('/debug/cleanup-user/:userId', (req, res) => {
+  const { userId } = req.params;
+  
+  const activeRideId = userActiveRides.get(userId);
+  if (activeRideId) {
+    logEvent('MANUAL_CLEANUP_USER', { userId, rideId: activeRideId });
+    cleanupRide(activeRideId, userId);
+    res.json({ 
+      success: true, 
+      message: `Cleaned up active ride for user ${userId}`,
+      cleanedRideId: activeRideId
+    });
+  } else {
+    res.json({ 
+      success: false, 
+      message: `No active ride found for user ${userId}` 
+    });
+  }
 });
 
 const io = new Server({
@@ -319,6 +372,14 @@ io.on("connection", (socket) => {
       lastSeen: Date.now()
     });
     logEvent('USER_CONNECTED', { userId: id, totalUsers: connectedUsers.size });
+    
+    // Debug: Log room joining
+    logEvent('USER_JOINED_ROOM', { 
+      userId: id, 
+      socketId: socket.id, 
+      room: `user:${id}`,
+      allRooms: Array.from(socket.rooms)
+    });
   }
 
   // ========================================
@@ -530,7 +591,23 @@ io.on("connection", (socket) => {
       };
     
       logEvent('NOTIFY_CUSTOMER_ACCEPTED', { userId: currentRide.userId, rideId: data.rideId });
+      
+      // Debug: Check if user room exists and has sockets
+      const userRoom = io.sockets.adapter.rooms.get(`user:${currentRide.userId}`);
+      const roomSockets = userRoom ? Array.from(userRoom) : [];
+      logEvent('USER_ROOM_DEBUG', { 
+        userId: currentRide.userId, 
+        roomExists: !!userRoom, 
+        socketCount: roomSockets.length,
+        socketIds: roomSockets 
+      });
+      
       io.to(`user:${currentRide.userId}`).emit("ride_accepted", notificationData);
+      logEvent('RIDE_ACCEPTED_EMITTED', { 
+        userId: currentRide.userId, 
+        rideId: data.rideId,
+        notificationData 
+      });
 
       // Send complete ride details to the accepting driver
       const safePickup = {
