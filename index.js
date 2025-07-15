@@ -63,6 +63,21 @@ setInterval(() => {
     }
   }
   
+  // Clean up drivers stuck in busy status without active rides
+  for (const [driverId, driver] of connectedDrivers.entries()) {
+    if (driver.status === "busy") {
+      // Check if this driver has any active rides
+      const hasActiveRide = Array.from(activeRides.entries()).some(([rideId, ride]) => 
+        ride.driverId === driverId && (ride.status === "accepted" || ride.status === "pending")
+      );
+      
+      if (!hasActiveRide) {
+        console.log(`🟢 Driver ${driverId} was stuck in busy status, resetting to online`);
+        driver.status = "online";
+      }
+    }
+  }
+  
   // Clean up stale ride acceptance attempts
   for (const [rideId, attempts] of rideAcceptanceAttempts.entries()) {
     if (!activeRides.has(rideId)) {
@@ -308,10 +323,12 @@ io.on("connection", (socket) => {
     const existingRide = userActiveRides.get(data.userId);
     if (existingRide) {
       const ride = activeRides.get(existingRide);
-      if (ride && ride.status === "pending") {
-        console.log("❌ User already has an active ride request:", data.userId);
+      if (ride && (ride.status === "pending" || ride.status === "accepted")) {
+        console.log("❌ User already has an active ride:", data.userId, "status:", ride.status);
         socket.emit("ride_response_error", {
-          message: "You already have an active ride request. Please wait or cancel the existing request."
+          message: ride.status === "pending" 
+            ? "You already have an active ride request. Please wait or cancel the existing request."
+            : "You already have an active ride in progress. Please complete your current ride first."
         });
         return;
       } else {
@@ -395,6 +412,9 @@ io.on("connection", (socket) => {
         
         activeRides.delete(rideId);
         rideRequestRecipients.delete(rideId);
+        rideLocks.delete(rideId);
+        rideAcceptanceAttempts.delete(rideId);
+        userActiveRides.delete(data.userId); // Clean up user's active ride request
         
         // Notify user that no drivers were found
         io.to(`user:${data.userId}`).emit("ride_timeout", {
@@ -415,6 +435,15 @@ io.on("connection", (socket) => {
           
           activeRides.delete(rideId);
           rideRequestRecipients.delete(rideId);
+          rideLocks.delete(rideId);
+          rideAcceptanceAttempts.delete(rideId);
+          userActiveRides.delete(data.userId); // Clean up user's active ride request
+          
+          // Notify user that ride request expired
+          io.to(`user:${data.userId}`).emit("ride_timeout", {
+            rideId: rideId,
+            message: "Ride request expired. Please try again."
+          });
         }
       }
     }, 300000); // 5 minutes
@@ -431,9 +460,20 @@ io.on("connection", (socket) => {
     const ride = activeRides.get(data.rideId);
     if (!ride) {
       console.error("❌ Ride not found:", data.rideId);
-      socket.emit("ride_response_error", { 
-        message: "Ride not found or already processed" 
-      });
+      
+      // Check if this ride was recently cleaned up and notify the driver appropriately
+      const wasRecentlyCleaned = Array.from(userActiveRides.entries()).some(([userId, rideId]) => rideId === data.rideId);
+      
+      if (wasRecentlyCleaned) {
+        console.log(`🔄 Ride ${data.rideId} was recently cleaned up, notifying driver`);
+        socket.emit("ride_response_error", { 
+          message: "This ride request has expired. Please look for new ride requests." 
+        });
+      } else {
+        socket.emit("ride_response_error", { 
+          message: "Ride not found or already processed" 
+        });
+      }
       return;
     }
 
@@ -462,6 +502,15 @@ io.on("connection", (socket) => {
         return;
       }
       
+      // Check if this ride has already been accepted by another driver
+      if (ride.status === "accepted" && ride.driverId !== data.driverId) {
+        console.log("🚫 Ride already accepted by another driver:", data.rideId, ride.driverId);
+        socket.emit("ride_response_error", {
+          message: "This ride has already been accepted by another driver."
+        });
+        return;
+      }
+      
       // Check if this driver has already attempted to accept this ride
       const attempts = rideAcceptanceAttempts.get(data.rideId) || new Set();
       if (attempts.has(data.driverId)) {
@@ -484,8 +533,18 @@ io.on("connection", (socket) => {
       // Check if ride is already accepted or cancelled
       if (ride.status !== "pending") {
         console.log("❌ Ride already processed (status:", ride.status, "):", data.rideId);
+        let errorMessage;
+        if (ride.status === "accepted") {
+          errorMessage = "Ride already accepted by another driver";
+        } else if (ride.status === "cancelled") {
+          errorMessage = "Ride was cancelled by the user";
+        } else if (ride.status === "completed") {
+          errorMessage = "Ride has already been completed";
+        } else {
+          errorMessage = `Ride already ${ride.status}`;
+        }
         socket.emit("ride_response_error", {
-          message: `Ride already ${ride.status === "accepted" ? "accepted by another driver" : ride.status}`
+          message: errorMessage
         });
         return;
       }
@@ -899,6 +958,29 @@ io.on("connection", (socket) => {
     // Clean up connections
     if (type === "driver") {
       socket.leave("drivers");
+      
+      // Check if driver had an active ride and notify the user
+      for (const [rideId, ride] of activeRides.entries()) {
+        if (ride.driverId === id && ride.status === "accepted") {
+          console.log(`🔴 Driver ${id} disconnected with active ride ${rideId}, notifying user`);
+          io.to(`user:${ride.userId}`).emit("driver_disconnected", {
+            rideId: rideId,
+            driverId: id
+          });
+          
+          // Reset ride status to pending so another driver can accept it
+          ride.status = "pending";
+          ride.driverId = null;
+          ride.acceptedBy = null;
+          
+          // Reset driver status to online in case they reconnect
+          const driver = connectedDrivers.get(id);
+          if (driver) {
+            driver.status = "online";
+          }
+        }
+      }
+      
       connectedDrivers.delete(id);
       
       // Remove this driver from all ride request recipients
@@ -913,7 +995,21 @@ io.on("connection", (socket) => {
     } else if (type === "user" || type === "customer") {
       socket.leave(`user:${id}`);
       connectedUsers.delete(id);
-      userActiveRides.delete(id); // Clean up user's active ride request on disconnect
+      
+      // Check if user had an active ride and notify the driver
+      const activeRideId = userActiveRides.get(id);
+      if (activeRideId) {
+        const ride = activeRides.get(activeRideId);
+        if (ride && ride.status === "accepted" && ride.driverId) {
+          console.log(`🔴 User ${id} disconnected with active ride ${activeRideId}, notifying driver`);
+          io.to(`driver:${ride.driverId}`).emit("user_disconnected", {
+            rideId: activeRideId,
+            userId: id
+          });
+        }
+        userActiveRides.delete(id); // Clean up user's active ride request on disconnect
+      }
+      
       console.log(`👤 ${userTypeDisplay} ${id} disconnected. Total users: ${connectedUsers.size}`);
     }
   });

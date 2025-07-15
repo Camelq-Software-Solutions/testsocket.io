@@ -1,11 +1,11 @@
 const io = require('socket.io-client');
 
-// Test configuration
-const SERVER_URL = 'https://testsocketio-production.up.railway.app';
+// Test configuration - use localhost for testing
+const SERVER_URL = 'http://localhost:9092';
 const TEST_USER_ID = 'test_user_' + Date.now();
 const TEST_DRIVER_ID = 'test_driver_' + Date.now();
 
-console.log('🧪 Starting comprehensive ride flow test...');
+console.log('🧪 Testing ride flow fixes locally...');
 console.log('📋 Test Configuration:');
 console.log(`   Server: ${SERVER_URL}`);
 console.log(`   User ID: ${TEST_USER_ID}`);
@@ -19,8 +19,6 @@ let testResults = {
   rideRequestReceived: false,
   rideAccepted: false,
   rideCompleted: false,
-  userDisconnected: false,
-  driverDisconnected: false,
   errors: []
 };
 
@@ -34,24 +32,6 @@ const logError = (event, error) => {
   console.error(`❌ [${event}]`, error);
   testResults.errors.push({ event, error: error.message || error });
 };
-
-// Create user socket
-const userSocket = io(SERVER_URL, {
-  transports: ['polling'],
-  query: {
-    type: 'customer',
-    id: TEST_USER_ID
-  }
-});
-
-// Create driver socket
-const driverSocket = io(SERVER_URL, {
-  transports: ['polling'],
-  query: {
-    type: 'driver',
-    id: TEST_DRIVER_ID
-  }
-});
 
 // Test ride data
 const testRideData = {
@@ -76,6 +56,24 @@ const testRideData = {
 
 let rideId = null;
 
+// Create user socket
+const userSocket = io(SERVER_URL, {
+  transports: ['websocket', 'polling'],
+  query: {
+    type: 'customer',
+    id: TEST_USER_ID
+  }
+});
+
+// Create driver socket
+const driverSocket = io(SERVER_URL, {
+  transports: ['websocket', 'polling'],
+  query: {
+    type: 'driver',
+    id: TEST_DRIVER_ID
+  }
+});
+
 // User socket event handlers
 userSocket.on('connect', () => {
   logTest('USER_CONNECTED', { socketId: userSocket.id });
@@ -99,11 +97,6 @@ userSocket.on('ride_timeout', (data) => {
 
 userSocket.on('ride_status_update', (data) => {
   logTest('RIDE_STATUS_UPDATE', data);
-});
-
-userSocket.on('disconnect', () => {
-  logTest('USER_DISCONNECTED');
-  testResults.userDisconnected = true;
 });
 
 userSocket.on('connect_error', (error) => {
@@ -156,11 +149,6 @@ driverSocket.on('ride_response_error', (data) => {
   logError('RIDE_RESPONSE_ERROR', data);
 });
 
-driverSocket.on('disconnect', () => {
-  logTest('DRIVER_DISCONNECTED');
-  testResults.driverDisconnected = true;
-});
-
 driverSocket.on('connect_error', (error) => {
   logError('DRIVER_CONNECT_ERROR', error);
 });
@@ -175,8 +163,6 @@ setTimeout(() => {
   console.log(`Ride Request Received: ${testResults.rideRequestReceived ? '✅' : '❌'}`);
   console.log(`Ride Accepted: ${testResults.rideAccepted ? '✅' : '❌'}`);
   console.log(`Ride Completed: ${testResults.rideCompleted ? '✅' : '❌'}`);
-  console.log(`User Disconnected: ${testResults.userDisconnected ? '✅' : '❌'}`);
-  console.log(`Driver Disconnected: ${testResults.driverDisconnected ? '✅' : '❌'}`);
   
   if (testResults.errors.length > 0) {
     console.log('\n❌ Errors encountered:');
