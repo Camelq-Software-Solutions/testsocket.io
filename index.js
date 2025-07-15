@@ -347,9 +347,9 @@ io.on("connection", (socket) => {
     const ride = activeRides.get(data.rideId);
     if (!ride) {
       logEvent('RIDE_NOT_FOUND', { rideId: data.rideId });
-      socket.emit("ride_response_error", { 
-        message: "This ride request has expired. Please look for new ride requests." 
-      });
+        socket.emit("ride_response_error", { 
+          message: "This ride request has expired. Please look for new ride requests." 
+        });
       return;
     }
 
@@ -412,66 +412,66 @@ io.on("connection", (socket) => {
         currentRide.acceptedAt = Date.now();
 
         // Mark driver as busy
-        const acceptingDriver = connectedDrivers.get(data.driverId);
-        if (acceptingDriver) {
-          acceptingDriver.status = "busy";
+          const acceptingDriver = connectedDrivers.get(data.driverId);
+          if (acceptingDriver) {
+            acceptingDriver.status = "busy";
           logEvent('DRIVER_MARKED_BUSY', { driverId: data.driverId });
-        }
+          }
 
         logEvent('RIDE_ACCEPTED', { rideId: data.rideId, driverId: data.driverId });
 
-        // Notify user
-        const notificationData = {
-          rideId: data.rideId,
-          driverId: data.driverId,
-          driverName: data.driverName || "Driver",
-          driverPhone: data.driverPhone || "+1234567890",
-          estimatedArrival: data.estimatedArrival || "5 minutes"
-        };
+          // Notify user
+          const notificationData = {
+            rideId: data.rideId,
+            driverId: data.driverId,
+            driverName: data.driverName || "Driver",
+            driverPhone: data.driverPhone || "+1234567890",
+            estimatedArrival: data.estimatedArrival || "5 minutes"
+          };
         
         logEvent('NOTIFY_USER_ACCEPTED', { userId: currentRide.userId, rideId: data.rideId });
         io.to(`user:${currentRide.userId}`).emit("ride_accepted", notificationData);
 
-        // Send complete ride details to the accepting driver
-        const safePickup = {
+          // Send complete ride details to the accepting driver
+          const safePickup = {
           latitude: currentRide.pickup.latitude,
           longitude: currentRide.pickup.longitude,
           address: currentRide.pickup.address || currentRide.pickup.name || 'Unknown Address',
           name: currentRide.pickup.name || currentRide.pickup.address || 'Unknown Name',
-        };
-        const safeDrop = {
+          };
+          const safeDrop = {
           id: currentRide.drop.id || 'dest_1',
           name: currentRide.drop.name || currentRide.drop.address || 'Unknown Name',
           address: currentRide.drop.address || currentRide.drop.name || 'Unknown Address',
           latitude: currentRide.drop.latitude,
           longitude: currentRide.drop.longitude,
           type: currentRide.drop.type || '',
-        };
+          };
         
-        socket.emit("ride_accepted_with_details", {
-          rideId: data.rideId,
+          socket.emit("ride_accepted_with_details", {
+            rideId: data.rideId,
           userId: currentRide.userId,
-          pickup: safePickup,
-          drop: safeDrop,
+            pickup: safePickup,
+            drop: safeDrop,
           rideType: currentRide.rideType,
           price: currentRide.price,
-          driverId: data.driverId,
-          driverName: data.driverName || "Driver",
-          driverPhone: data.driverPhone || "+1234567890",
-          estimatedArrival: data.estimatedArrival || "5 minutes",
+            driverId: data.driverId,
+            driverName: data.driverName || "Driver",
+            driverPhone: data.driverPhone || "+1234567890",
+            estimatedArrival: data.estimatedArrival || "5 minutes",
           status: currentRide.status,
           createdAt: currentRide.createdAt
-        });
+          });
 
-        // Notify all drivers that ride is taken
-        io.to("drivers").emit("ride_taken", {
-          rideId: data.rideId,
-          driverId: data.driverId
-        });
+          // Notify all drivers that ride is taken
+          io.to("drivers").emit("ride_taken", {
+            rideId: data.rideId,
+            driverId: data.driverId
+          });
 
-        // Clean up ride request tracking
-        rideRequestRecipients.delete(data.rideId);
-        rideAcceptanceAttempts.delete(data.rideId);
+          // Clean up ride request tracking
+          rideRequestRecipients.delete(data.rideId);
+          rideAcceptanceAttempts.delete(data.rideId);
 
         logEvent('RIDE_ACCEPTANCE_COMPLETE', { rideId: data.rideId, driverId: data.driverId });
       } finally {
