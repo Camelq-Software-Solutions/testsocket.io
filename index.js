@@ -131,7 +131,7 @@ io.on("connection", (socket) => {
       console.log(`📢 Sending ${activeRideRequests.length} active ride requests to newly connected driver ${id}`);
       socket.emit("active_ride_requests", activeRideRequests);
     }
-  } else if (type === "user") {
+  } else if (type === "user" || type === "customer") {
     socket.join(`user:${id}`);
     connectedUsers.set(id, {
       socketId: socket.id,
@@ -532,7 +532,7 @@ io.on("connection", (socket) => {
       }
       
       console.log(`🚗 Driver ${id} disconnected. Total drivers: ${connectedDrivers.size}`);
-    } else if (type === "user") {
+    } else if (type === "user" || type === "customer") {
       socket.leave(`user:${id}`);
       connectedUsers.delete(id);
       console.log(`👤 User ${id} disconnected. Total users: ${connectedUsers.size}`);
