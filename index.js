@@ -425,6 +425,19 @@ io.on("connection", (socket) => {
         return;
       }
       
+      // Check if this driver has already accepted another ride
+      const existingRide = Array.from(activeRides.entries()).find(([rideId, ride]) => 
+        ride.driverId === data.driverId && ride.status === "accepted"
+      );
+      
+      if (existingRide) {
+        console.log("🚫 Driver has already accepted another ride:", data.driverId, existingRide[0]);
+        socket.emit("ride_response_error", {
+          message: "You have already accepted another ride. Please complete that ride first."
+        });
+        return;
+      }
+      
       // Check if this driver has already attempted to accept this ride
       const attempts = rideAcceptanceAttempts.get(data.rideId) || new Set();
       if (attempts.has(data.driverId)) {
@@ -662,6 +675,60 @@ io.on("connection", (socket) => {
     userActiveRides.delete(ride.userId); // Clean up user's active ride request
     
     console.log(`✅ Ride ${data.rideId} cancelled successfully`);
+  });
+
+  // Handle ride completion
+  socket.on("complete_ride", (data) => {
+    console.log("✅ Ride completion request:", data);
+    
+    const ride = activeRides.get(data.rideId);
+    if (!ride) {
+      console.log("❌ Ride not found for completion:", data.rideId);
+      socket.emit("ride_completion_error", {
+        message: "Ride not found or already completed"
+      });
+      return;
+    }
+    
+    if (ride.status === "accepted" && ride.driverId === data.driverId) {
+      console.log("✅ Completing ride:", data.rideId);
+      logRideEvent('COMPLETED', data.rideId, { 
+        driverId: data.driverId,
+        userId: ride.userId 
+      });
+      
+      // Mark driver as available again
+      const driver = connectedDrivers.get(data.driverId);
+      if (driver) {
+        driver.status = "online";
+        console.log(`🟢 Driver ${data.driverId} marked as available after completing ride`);
+      }
+      
+      // Clean up ride data
+      activeRides.delete(data.rideId);
+      userActiveRides.delete(ride.userId);
+      
+      // Notify user and driver
+      io.to(`user:${ride.userId}`).emit("ride_status_update", {
+        rideId: data.rideId,
+        status: "completed",
+        message: "Ride completed successfully",
+        timestamp: Date.now()
+      });
+      
+      socket.emit("ride_completed", {
+        rideId: data.rideId,
+        message: "Ride completed successfully",
+        timestamp: Date.now()
+      });
+      
+      console.log(`✅ Ride ${data.rideId} completed successfully`);
+    } else {
+      console.log("❌ Cannot complete ride:", ride.status, "driver:", ride.driverId);
+      socket.emit("ride_completion_error", {
+        message: "Cannot complete this ride"
+      });
+    }
   });
 
   // Handle driver location updates
