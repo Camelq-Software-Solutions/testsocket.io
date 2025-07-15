@@ -21,6 +21,9 @@ const rideRequestRecipients = new Map();
 // Track user's active ride requests to prevent duplicates
 const userActiveRides = new Map();
 
+// Track which drivers have already attempted to accept each ride
+const rideAcceptanceAttempts = new Map();
+
 // Add cleanup interval for stale rides and locks
 setInterval(() => {
   const now = Date.now();
@@ -41,6 +44,7 @@ setInterval(() => {
       activeRides.delete(rideId);
       rideRequestRecipients.delete(rideId);
       rideLocks.delete(rideId);
+      rideAcceptanceAttempts.delete(rideId);
       userActiveRides.delete(ride.userId); // Clean up user's active ride request
       
       // Notify user that ride request expired
@@ -56,6 +60,14 @@ setInterval(() => {
     if (!activeRides.has(rideId)) {
       console.log(`🧹 Cleaning up stale user active ride entry: ${userId} -> ${rideId}`);
       userActiveRides.delete(userId);
+    }
+  }
+  
+  // Clean up stale ride acceptance attempts
+  for (const [rideId, attempts] of rideAcceptanceAttempts.entries()) {
+    if (!activeRides.has(rideId)) {
+      console.log(`🧹 Cleaning up stale ride acceptance attempts: ${rideId}`);
+      rideAcceptanceAttempts.delete(rideId);
     }
   }
 }, 30000); // Run every 30 seconds
@@ -78,6 +90,11 @@ app.get('/debug/sockets', (req, res) => {
       rideId,
       recipientCount: recipients.size,
       recipients: Array.from(recipients)
+    })),
+    rideAcceptanceAttempts: Array.from(rideAcceptanceAttempts.entries()).map(([rideId, attempts]) => ({
+      rideId,
+      attemptCount: attempts.size,
+      attempts: Array.from(attempts)
     })),
     rooms: Array.from(io.sockets.adapter.rooms.entries()).map(([room, sockets]) => ({
       room,
@@ -159,6 +176,7 @@ const logServerState = () => {
     rideLocks: rideLocks.size,
     rideRequestRecipients: rideRequestRecipients.size,
     userActiveRides: userActiveRides.size,
+    rideAcceptanceAttempts: rideAcceptanceAttempts.size,
     timestamp: new Date().toISOString()
   });
 };
@@ -369,6 +387,16 @@ io.on("connection", (socket) => {
 
     // Locking logic to prevent race conditions
     if (data.response === "accept") {
+      // Check if this driver has already attempted to accept this ride
+      const attempts = rideAcceptanceAttempts.get(data.rideId) || new Set();
+      if (attempts.has(data.driverId)) {
+        console.log("🚫 Driver has already attempted to accept this ride:", data.driverId, data.rideId);
+        socket.emit("ride_response_error", {
+          message: "You have already attempted to accept this ride"
+        });
+        return;
+      }
+      
       // Check if ride is already locked or accepted
       if (rideLocks.has(data.rideId)) {
         console.log("🚫 Ride is being processed by another driver:", data.rideId);
@@ -389,6 +417,10 @@ io.on("connection", (socket) => {
       
       // Add lock before processing
       rideLocks.add(data.rideId);
+      
+      // Mark this driver as having attempted to accept this ride
+      attempts.add(data.driverId);
+      rideAcceptanceAttempts.set(data.rideId, attempts);
       
       try {
         // Double-check ride status after acquiring lock
@@ -462,6 +494,7 @@ io.on("connection", (socket) => {
 
           // Clean up ride request tracking
           rideRequestRecipients.delete(data.rideId);
+          rideAcceptanceAttempts.delete(data.rideId);
 
           console.log(`✅ Ride ${data.rideId} accepted by driver ${data.driverId}`);
         } else {
