@@ -369,7 +369,7 @@ io.on("connection", (socket) => {
   });
 
   // Handle driver ride acceptance/rejection
-  socket.on("ride_response", (data) => {
+  socket.on("ride_response", async (data) => {
     console.log("🚗 Driver ride response:", {
       driverId: data.driverId,
       rideId: data.rideId,
@@ -406,11 +406,11 @@ io.on("connection", (socket) => {
         return;
       }
       
-      // Check if ride is already accepted
+      // Check if ride is already accepted or cancelled
       if (ride.status !== "pending") {
-        console.log("❌ Ride already accepted by another driver:", data.rideId);
+        console.log("❌ Ride already processed (status:", ride.status, "):", data.rideId);
         socket.emit("ride_response_error", {
-          message: "Ride already accepted by another driver"
+          message: `Ride already ${ride.status === "accepted" ? "accepted by another driver" : ride.status}`
         });
         return;
       }
@@ -424,11 +424,34 @@ io.on("connection", (socket) => {
       
       try {
         // Double-check ride status after acquiring lock
-        if (ride.status === "pending") {
-          ride.status = "accepted";
-          ride.acceptedBy = data.driverId;
-          ride.driverId = data.driverId;
-          ride.acceptedAt = Date.now();
+        const currentRide = activeRides.get(data.rideId);
+        if (!currentRide) {
+          console.log("❌ Ride was deleted while processing:", data.rideId);
+          socket.emit("ride_response_error", {
+            message: "Ride was cancelled while processing"
+          });
+          return;
+        }
+        
+        if (currentRide.status === "pending") {
+          // Add a small delay to prevent automatic acceptance and ensure proper processing
+          await new Promise(resolve => setTimeout(resolve, 100));
+          
+          // Final check after delay
+          const finalRide = activeRides.get(data.rideId);
+          if (!finalRide || finalRide.status !== "pending") {
+            console.log("❌ Ride status changed during processing delay:", data.rideId);
+            socket.emit("ride_response_error", {
+              message: finalRide ? `Ride already ${finalRide.status}` : "Ride was cancelled during processing"
+            });
+            return;
+          }
+          
+          // Update ride status atomically
+          finalRide.status = "accepted";
+          finalRide.acceptedBy = data.driverId;
+          finalRide.driverId = data.driverId;
+          finalRide.acceptedAt = Date.now();
 
           logRideEvent('ACCEPTED', data.rideId, { 
             driverId: data.driverId,
@@ -436,7 +459,7 @@ io.on("connection", (socket) => {
           });
 
           // Notify user
-          console.log(`📢 Emitting ride_accepted to user:${ride.userId}`);
+          console.log(`📢 Emitting ride_accepted to user:${finalRide.userId}`);
           const notificationData = {
             rideId: data.rideId,
             driverId: data.driverId,
@@ -445,45 +468,45 @@ io.on("connection", (socket) => {
             estimatedArrival: data.estimatedArrival || "5 minutes"
           };
           console.log(`📤 Notification data being sent:`, JSON.stringify(notificationData, null, 2));
-          io.to(`user:${ride.userId}`).emit("ride_accepted", notificationData);
+          io.to(`user:${finalRide.userId}`).emit("ride_accepted", notificationData);
           
           // Check if user room exists
-          const userRoom = io.sockets.adapter.rooms.get(`user:${ride.userId}`);
-          console.log(`🔍 User room user:${ride.userId} exists:`, !!userRoom);
+          const userRoom = io.sockets.adapter.rooms.get(`user:${finalRide.userId}`);
+          console.log(`🔍 User room user:${finalRide.userId} exists:`, !!userRoom);
           if (userRoom) {
-            console.log(`👥 Users in room user:${ride.userId}:`, Array.from(userRoom));
+            console.log(`👥 Users in room user:${finalRide.userId}:`, Array.from(userRoom));
           }
 
           // Send complete ride details to the accepting driver
           console.log(`📢 Emitting ride_accepted_with_details to driver:${data.driverId}`);
           // Ensure pickup and drop have address and name
           const safePickup = {
-            latitude: ride.pickup.latitude,
-            longitude: ride.pickup.longitude,
-            address: ride.pickup.address || ride.pickup.name || 'Unknown Address',
-            name: ride.pickup.name || ride.pickup.address || 'Unknown Name',
+            latitude: finalRide.pickup.latitude,
+            longitude: finalRide.pickup.longitude,
+            address: finalRide.pickup.address || finalRide.pickup.name || 'Unknown Address',
+            name: finalRide.pickup.name || finalRide.pickup.address || 'Unknown Name',
           };
           const safeDrop = {
-            id: ride.drop.id || 'dest_1',
-            name: ride.drop.name || ride.drop.address || 'Unknown Name',
-            address: ride.drop.address || ride.drop.name || 'Unknown Address',
-            latitude: ride.drop.latitude,
-            longitude: ride.drop.longitude,
-            type: ride.drop.type || '',
+            id: finalRide.drop.id || 'dest_1',
+            name: finalRide.drop.name || finalRide.drop.address || 'Unknown Name',
+            address: finalRide.drop.address || finalRide.drop.name || 'Unknown Address',
+            latitude: finalRide.drop.latitude,
+            longitude: finalRide.drop.longitude,
+            type: finalRide.drop.type || '',
           };
           socket.emit("ride_accepted_with_details", {
             rideId: data.rideId,
-            userId: ride.userId,
+            userId: finalRide.userId,
             pickup: safePickup,
             drop: safeDrop,
-            rideType: ride.rideType,
-            price: ride.price,
+            rideType: finalRide.rideType,
+            price: finalRide.price,
             driverId: data.driverId,
             driverName: data.driverName || "Driver",
             driverPhone: data.driverPhone || "+1234567890",
             estimatedArrival: data.estimatedArrival || "5 minutes",
-            status: ride.status,
-            createdAt: ride.createdAt
+            status: finalRide.status,
+            createdAt: finalRide.createdAt
           });
 
           // Notify all drivers that ride is taken
@@ -498,9 +521,9 @@ io.on("connection", (socket) => {
 
           console.log(`✅ Ride ${data.rideId} accepted by driver ${data.driverId}`);
         } else {
-          console.log("❌ Ride status changed while processing:", data.rideId);
+          console.log("❌ Ride status changed while processing:", data.rideId, "Current status:", currentRide.status);
           socket.emit("ride_response_error", {
-            message: "Ride already accepted by another driver"
+            message: `Ride already ${currentRide.status === "accepted" ? "accepted by another driver" : currentRide.status}`
           });
         }
       } finally {
@@ -535,6 +558,27 @@ io.on("connection", (socket) => {
     const ride = activeRides.get(data.rideId);
     if (!ride) {
       console.log("❌ Ride not found for cancellation:", data.rideId);
+      socket.emit("ride_cancellation_error", {
+        message: "Ride not found or already cancelled"
+      });
+      return;
+    }
+    
+    // Check if ride is currently being processed (locked)
+    if (rideLocks.has(data.rideId)) {
+      console.log("🚫 Ride is currently being processed, cannot cancel:", data.rideId);
+      socket.emit("ride_cancellation_error", {
+        message: "Ride is currently being processed by a driver. Please wait a moment."
+      });
+      return;
+    }
+    
+    // Check if ride is already cancelled
+    if (ride.status === "cancelled") {
+      console.log("❌ Ride already cancelled:", data.rideId);
+      socket.emit("ride_cancellation_error", {
+        message: "Ride is already cancelled"
+      });
       return;
     }
     
@@ -569,6 +613,7 @@ io.on("connection", (socket) => {
     activeRides.delete(data.rideId);
     rideRequestRecipients.delete(data.rideId);
     rideLocks.delete(data.rideId);
+    rideAcceptanceAttempts.delete(data.rideId);
     userActiveRides.delete(ride.userId); // Clean up user's active ride request
     
     console.log(`✅ Ride ${data.rideId} cancelled successfully`);
