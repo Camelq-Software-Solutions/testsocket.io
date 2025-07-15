@@ -23,6 +23,32 @@ const logEvent = (event, data = {}) => {
   console.log(`[${new Date().toISOString()}] ${event}:`, data);
 };
 
+// Ride State Machine
+const RIDE_STATES = {
+  SEARCHING: 'searching',      // Initial state when ride is created
+  ACCEPTED: 'accepted',        // Driver has accepted the ride
+  ARRIVED: 'arrived',          // Driver has arrived at pickup
+  STARTED: 'started',          // Ride has started (driver picked up passenger)
+  COMPLETED: 'completed',      // Ride has been completed
+  CANCELLED: 'cancelled',      // Ride was cancelled
+  EXPIRED: 'expired'           // Ride request expired without acceptance
+};
+
+// State transition validation
+const isValidStateTransition = (fromState, toState) => {
+  const validTransitions = {
+    [RIDE_STATES.SEARCHING]: [RIDE_STATES.ACCEPTED, RIDE_STATES.CANCELLED, RIDE_STATES.EXPIRED],
+    [RIDE_STATES.ACCEPTED]: [RIDE_STATES.ARRIVED, RIDE_STATES.CANCELLED],
+    [RIDE_STATES.ARRIVED]: [RIDE_STATES.STARTED, RIDE_STATES.CANCELLED],
+    [RIDE_STATES.STARTED]: [RIDE_STATES.COMPLETED, RIDE_STATES.CANCELLED],
+    [RIDE_STATES.COMPLETED]: [], // Terminal state
+    [RIDE_STATES.CANCELLED]: [], // Terminal state
+    [RIDE_STATES.EXPIRED]: []    // Terminal state
+  };
+  
+  return validTransitions[fromState]?.includes(toState) || false;
+};
+
 // Helper function to validate ride data
 const validateRideData = (data) => {
   const required = ['pickup', 'drop', 'rideType', 'price', 'userId'];
@@ -65,7 +91,7 @@ const resetDriverStatus = (driverId) => {
   if (driver && driver.status === 'busy') {
     // Check if driver actually has any active rides
     const hasActiveRide = Array.from(activeRides.entries()).some(([_, ride]) => 
-      ride.driverId === driverId && (ride.status === 'accepted' || ride.status === 'pending')
+      ride.driverId === driverId && (ride.status === RIDE_STATES.ACCEPTED || ride.status === RIDE_STATES.ARRIVED || ride.status === RIDE_STATES.STARTED)
     );
     
     if (!hasActiveRide) {
@@ -75,6 +101,35 @@ const resetDriverStatus = (driverId) => {
     }
   }
   return false;
+};
+
+// Helper function to update ride state
+const updateRideState = (rideId, newState, additionalData = {}) => {
+  const ride = activeRides.get(rideId);
+  if (!ride) {
+    return { success: false, error: 'Ride not found' };
+  }
+  
+  if (!isValidStateTransition(ride.status, newState)) {
+    return { success: false, error: `Invalid state transition from ${ride.status} to ${newState}` };
+  }
+  
+  const oldState = ride.status;
+  ride.status = newState;
+  ride.lastUpdated = Date.now();
+  
+  // Add additional data
+  Object.assign(ride, additionalData);
+  
+  logEvent('RIDE_STATE_CHANGED', { 
+    rideId, 
+    from: oldState, 
+    to: newState, 
+    userId: ride.userId,
+    driverId: ride.driverId 
+  });
+  
+  return { success: true, ride };
 };
 
 // Cleanup interval for stale data
@@ -91,17 +146,21 @@ setInterval(() => {
     }
   }
   
-  // Clean up old pending rides (older than 5 minutes)
+  // Clean up old searching rides (older than 5 minutes)
   for (const [rideId, ride] of activeRides.entries()) {
-    if (ride.status === 'pending' && (now - ride.createdAt) > 300000) {
-      logEvent('CLEANUP_OLD_PENDING_RIDE', { rideId, age: Math.round((now - ride.createdAt)/1000) });
-      cleanupRide(rideId, ride.userId);
+    if (ride.status === RIDE_STATES.SEARCHING && (now - ride.createdAt) > 300000) {
+      logEvent('CLEANUP_OLD_SEARCHING_RIDE', { rideId, age: Math.round((now - ride.createdAt)/1000) });
+      
+      // Update state to expired
+      updateRideState(rideId, RIDE_STATES.EXPIRED);
       
       // Notify user that ride request expired
-      io.to(`user:${ride.userId}`).emit("ride_timeout", {
+      io.to(`user:${ride.userId}`).emit("ride_expired", {
         rideId: rideId,
         message: "Ride request expired. Please try again."
       });
+      
+      cleanupRide(rideId, ride.userId);
       cleanedCount++;
     }
   }
@@ -199,7 +258,7 @@ io.on("connection", (socket) => {
     if (driver && driver.status === "online") {
       const activeRideRequests = Array.from(activeRides.entries())
         .filter(([rideId, ride]) => {
-          if (ride.status !== "pending") return false;
+          if (ride.status !== RIDE_STATES.SEARCHING) return false;
           
           const recipients = rideRequestRecipients.get(rideId);
           if (recipients && recipients.has(id)) {
@@ -240,18 +299,22 @@ io.on("connection", (socket) => {
     logEvent('USER_CONNECTED', { userId: id, totalUsers: connectedUsers.size });
   }
 
-  // Handle ride booking
-  socket.on("book_ride", (data) => {
-    logEvent('BOOK_RIDE_REQUEST', { userId: data.userId, price: data.price });
+  // ========================================
+  // RIDE BOOKING FLOW - CUSTOMER EVENTS
+  // ========================================
+
+  // Event: Customer requests a new ride
+  socket.on("request_ride", (data) => {
+    logEvent('REQUEST_RIDE', { userId: data.userId, price: data.price });
     
     // Check if user already has an active ride request
     const existingRide = userActiveRides.get(data.userId);
     if (existingRide) {
       const ride = activeRides.get(existingRide);
-      if (ride && (ride.status === "pending" || ride.status === "accepted")) {
+      if (ride && (ride.status === RIDE_STATES.SEARCHING || ride.status === RIDE_STATES.ACCEPTED || ride.status === RIDE_STATES.ARRIVED || ride.status === RIDE_STATES.STARTED)) {
         logEvent('USER_HAS_ACTIVE_RIDE', { userId: data.userId, status: ride.status });
-        socket.emit("ride_response_error", {
-          message: ride.status === "pending" 
+        socket.emit("ride_request_error", {
+          message: ride.status === RIDE_STATES.SEARCHING 
             ? "You already have an active ride request. Please wait or cancel the existing request."
             : "You already have an active ride in progress. Please complete your current ride first."
         });
@@ -266,7 +329,7 @@ io.on("connection", (socket) => {
     const validation = validateRideData(data);
     if (!validation.valid) {
       logEvent('INVALID_RIDE_DATA', { error: validation.error });
-      socket.emit("ride_response_error", {
+      socket.emit("ride_request_error", {
         message: validation.error
       });
       return;
@@ -274,7 +337,7 @@ io.on("connection", (socket) => {
     
     const rideId = `ride_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     
-    // Create ride entry
+    // Create ride entry with SEARCHING state
     const rideData = {
       rideId,
       userId: data.userId,
@@ -282,7 +345,7 @@ io.on("connection", (socket) => {
       drop: data.drop,
       rideType: data.rideType,
       price: data.price,
-      status: "pending",
+      status: RIDE_STATES.SEARCHING,
       createdAt: Date.now(),
       acceptedBy: null,
       driverId: null
@@ -290,14 +353,15 @@ io.on("connection", (socket) => {
     
     activeRides.set(rideId, rideData);
     userActiveRides.set(data.userId, rideId);
-    logEvent('RIDE_CREATED', { rideId, userId: data.userId, price: data.price });
+    logEvent('RIDE_CREATED', { rideId, userId: data.userId, price: data.price, status: RIDE_STATES.SEARCHING });
     
-    // Emit back to the user that ride is booked
-    socket.emit("ride_booked", {
+    // Emit back to the user that ride request is created
+    socket.emit("ride_request_created", {
       success: true,
       rideId: rideId,
       price: data.price,
-      message: "Ride booked successfully! Searching for drivers..."
+      message: "Ride request created! Searching for drivers...",
+      status: RIDE_STATES.SEARCHING
     });
     
     // Send to currently connected drivers
@@ -324,180 +388,306 @@ io.on("connection", (socket) => {
       logEvent('NO_AVAILABLE_DRIVERS', { rideId });
     }
     
-    // Set timeout to clean up the ride request
+    // Set timeout to expire the ride request
     setTimeout(() => {
       const ride = activeRides.get(rideId);
-      if (ride && ride.status === "pending") {
-        logEvent('RIDE_TIMEOUT', { rideId });
-        cleanupRide(rideId, data.userId);
+      if (ride && ride.status === RIDE_STATES.SEARCHING) {
+        logEvent('RIDE_REQUEST_EXPIRED', { rideId });
+        
+        // Update state to expired
+        updateRideState(rideId, RIDE_STATES.EXPIRED);
         
         // Notify user that no drivers were found
-        io.to(`user:${data.userId}`).emit("ride_timeout", {
+        io.to(`user:${data.userId}`).emit("ride_expired", {
           rideId: rideId,
           message: "No drivers found. Please try again."
         });
+        
+        cleanupRide(rideId, data.userId);
       }
     }, 60000); // 1 minute timeout
   });
 
-  // Handle driver ride acceptance/rejection
-  socket.on("ride_response", async (data) => {
-    logEvent('DRIVER_RIDE_RESPONSE', { driverId: data.driverId, rideId: data.rideId, response: data.response });
+  // ========================================
+  // RIDE ACCEPTANCE FLOW - DRIVER EVENTS
+  // ========================================
+
+  // Event: Driver accepts or rejects a ride request
+  socket.on("accept_ride", async (data) => {
+    logEvent('DRIVER_ACCEPT_RIDE', { driverId: data.driverId, rideId: data.rideId });
 
     const ride = activeRides.get(data.rideId);
     if (!ride) {
-      logEvent('RIDE_NOT_FOUND', { rideId: data.rideId });
-        socket.emit("ride_response_error", { 
-          message: "This ride request has expired. Please look for new ride requests." 
-        });
+      logEvent('RIDE_NOT_FOUND_ACCEPT', { rideId: data.rideId });
+      socket.emit("ride_accept_error", { 
+        message: "This ride request has expired. Please look for new ride requests." 
+      });
       return;
     }
 
-    if (data.response === "accept") {
-      // Check if driver is already busy
-      const driver = connectedDrivers.get(data.driverId);
-      if (driver && driver.status === "busy") {
-        logEvent('DRIVER_BUSY', { driverId: data.driverId });
-        socket.emit("ride_response_error", {
-          message: "You are already busy with another ride. Please complete your current ride first."
+    // Check if driver is already busy
+    const driver = connectedDrivers.get(data.driverId);
+    if (driver && driver.status === "busy") {
+      logEvent('DRIVER_BUSY_ACCEPT', { driverId: data.driverId });
+      socket.emit("ride_accept_error", {
+        message: "You are already busy with another ride. Please complete your current ride first."
+      });
+      return;
+    }
+    
+    // Check if ride is already accepted
+    if (ride.status === RIDE_STATES.ACCEPTED) {
+      logEvent('RIDE_ALREADY_ACCEPTED', { rideId: data.rideId, acceptedBy: ride.driverId });
+      socket.emit("ride_accept_error", {
+        message: "This ride has already been accepted by another driver."
+      });
+      return;
+    }
+    
+    // Check if ride is locked (being processed by another driver)
+    if (rideLocks.has(data.rideId)) {
+      logEvent('RIDE_LOCKED_ACCEPT', { rideId: data.rideId });
+      socket.emit("ride_accept_error", {
+        message: "Ride is being processed by another driver. Please try another ride."
+      });
+      return;
+    }
+    
+    // Check if ride is still in searching state
+    if (ride.status !== RIDE_STATES.SEARCHING) {
+      logEvent('RIDE_NOT_SEARCHING', { rideId: data.rideId, status: ride.status });
+      socket.emit("ride_accept_error", {
+        message: `Ride is no longer available (status: ${ride.status})`
+      });
+      return;
+    }
+    
+    // Add lock to prevent race conditions
+    rideLocks.add(data.rideId);
+    
+    try {
+      // Double-check ride status after acquiring lock
+      const currentRide = activeRides.get(data.rideId);
+      if (!currentRide || currentRide.status !== RIDE_STATES.SEARCHING) {
+        logEvent('RIDE_STATUS_CHANGED_ACCEPT', { rideId: data.rideId, status: currentRide?.status });
+        socket.emit("ride_accept_error", {
+          message: currentRide ? `Ride is no longer available (status: ${currentRide.status})` : "Ride was cancelled during processing"
         });
         return;
       }
       
-      // Check if ride is already accepted
-      if (ride.status === "accepted") {
-        logEvent('RIDE_ALREADY_ACCEPTED', { rideId: data.rideId, acceptedBy: ride.driverId });
-        socket.emit("ride_response_error", {
-          message: "This ride has already been accepted by another driver."
-        });
-        return;
-      }
-      
-      // Check if ride is locked
-      if (rideLocks.has(data.rideId)) {
-        logEvent('RIDE_LOCKED', { rideId: data.rideId });
-        socket.emit("ride_response_error", {
-          message: "Ride is being processed by another driver. Please try another ride."
-        });
-        return;
-      }
-      
-      // Check if ride is not pending
-      if (ride.status !== "pending") {
-        logEvent('RIDE_NOT_PENDING', { rideId: data.rideId, status: ride.status });
-        socket.emit("ride_response_error", {
-          message: `Ride already ${ride.status}`
-        });
-        return;
-      }
-      
-      // Add lock and process acceptance
-      rideLocks.add(data.rideId);
-      
-      try {
-        // Double-check ride status after acquiring lock
-        const currentRide = activeRides.get(data.rideId);
-        if (!currentRide || currentRide.status !== "pending") {
-          logEvent('RIDE_STATUS_CHANGED', { rideId: data.rideId, status: currentRide?.status });
-          socket.emit("ride_response_error", {
-            message: currentRide ? `Ride already ${currentRide.status}` : "Ride was cancelled during processing"
-          });
-          return;
-        }
-        
-        // Update ride status
-        currentRide.status = "accepted";
-        currentRide.acceptedBy = data.driverId;
-        currentRide.driverId = data.driverId;
-        currentRide.acceptedAt = Date.now();
-
-        // Mark driver as busy
-          const acceptingDriver = connectedDrivers.get(data.driverId);
-          if (acceptingDriver) {
-            acceptingDriver.status = "busy";
-          logEvent('DRIVER_MARKED_BUSY', { driverId: data.driverId });
-          }
-
-        logEvent('RIDE_ACCEPTED', { rideId: data.rideId, driverId: data.driverId });
-
-          // Notify user
-          const notificationData = {
-            rideId: data.rideId,
-            driverId: data.driverId,
-            driverName: data.driverName || "Driver",
-            driverPhone: data.driverPhone || "+1234567890",
-            estimatedArrival: data.estimatedArrival || "5 minutes"
-          };
-        
-        logEvent('NOTIFY_USER_ACCEPTED', { userId: currentRide.userId, rideId: data.rideId });
-        io.to(`user:${currentRide.userId}`).emit("ride_accepted", notificationData);
-
-          // Send complete ride details to the accepting driver
-          const safePickup = {
-          latitude: currentRide.pickup.latitude,
-          longitude: currentRide.pickup.longitude,
-          address: currentRide.pickup.address || currentRide.pickup.name || 'Unknown Address',
-          name: currentRide.pickup.name || currentRide.pickup.address || 'Unknown Name',
-          };
-          const safeDrop = {
-          id: currentRide.drop.id || 'dest_1',
-          name: currentRide.drop.name || currentRide.drop.address || 'Unknown Name',
-          address: currentRide.drop.address || currentRide.drop.name || 'Unknown Address',
-          latitude: currentRide.drop.latitude,
-          longitude: currentRide.drop.longitude,
-          type: currentRide.drop.type || '',
-          };
-        
-          socket.emit("ride_accepted_with_details", {
-            rideId: data.rideId,
-          userId: currentRide.userId,
-            pickup: safePickup,
-            drop: safeDrop,
-          rideType: currentRide.rideType,
-          price: currentRide.price,
-            driverId: data.driverId,
-            driverName: data.driverName || "Driver",
-            driverPhone: data.driverPhone || "+1234567890",
-            estimatedArrival: data.estimatedArrival || "5 minutes",
-          status: currentRide.status,
-          createdAt: currentRide.createdAt
-          });
-
-          // Notify all drivers that ride is taken
-          io.to("drivers").emit("ride_taken", {
-            rideId: data.rideId,
-            driverId: data.driverId
-          });
-
-          // Clean up ride request tracking
-          rideRequestRecipients.delete(data.rideId);
-          rideAcceptanceAttempts.delete(data.rideId);
-
-        logEvent('RIDE_ACCEPTANCE_COMPLETE', { rideId: data.rideId, driverId: data.driverId });
-      } finally {
-        // Always remove lock after processing
-        rideLocks.delete(data.rideId);
-      }
-    } else if (data.response === "reject") {
-      logEvent('RIDE_REJECTED', { rideId: data.rideId, driverId: data.driverId });
-      
-      socket.emit("ride_response_confirmed", {
-        rideId: data.rideId,
-        response: "rejected"
+      // Update ride state to ACCEPTED
+      const updateResult = updateRideState(data.rideId, RIDE_STATES.ACCEPTED, {
+        acceptedBy: data.driverId,
+        driverId: data.driverId,
+        acceptedAt: Date.now()
       });
       
-      // Remove this driver from the recipients list for this ride
-      const recipients = rideRequestRecipients.get(data.rideId);
-      if (recipients) {
-        recipients.delete(data.driverId);
-        if (recipients.size === 0) {
-          rideRequestRecipients.delete(data.rideId);
-        }
+      if (!updateResult.success) {
+        socket.emit("ride_accept_error", { message: updateResult.error });
+        return;
+      }
+
+      // Mark driver as busy
+      const acceptingDriver = connectedDrivers.get(data.driverId);
+      if (acceptingDriver) {
+        acceptingDriver.status = "busy";
+        logEvent('DRIVER_MARKED_BUSY', { driverId: data.driverId });
+      }
+
+      logEvent('RIDE_ACCEPTED', { rideId: data.rideId, driverId: data.driverId });
+
+      // Notify customer that ride has been accepted
+      const notificationData = {
+        rideId: data.rideId,
+        driverId: data.driverId,
+        driverName: data.driverName || "Driver",
+        driverPhone: data.driverPhone || "+1234567890",
+        estimatedArrival: data.estimatedArrival || "5 minutes",
+        status: RIDE_STATES.ACCEPTED
+      };
+    
+      logEvent('NOTIFY_CUSTOMER_ACCEPTED', { userId: currentRide.userId, rideId: data.rideId });
+      io.to(`user:${currentRide.userId}`).emit("ride_accepted", notificationData);
+
+      // Send complete ride details to the accepting driver
+      const safePickup = {
+        latitude: currentRide.pickup.latitude,
+        longitude: currentRide.pickup.longitude,
+        address: currentRide.pickup.address || currentRide.pickup.name || 'Unknown Address',
+        name: currentRide.pickup.name || currentRide.pickup.address || 'Unknown Name',
+      };
+      const safeDrop = {
+        id: currentRide.drop.id || 'dest_1',
+        name: currentRide.drop.name || currentRide.drop.address || 'Unknown Name',
+        address: currentRide.drop.address || currentRide.drop.name || 'Unknown Address',
+        latitude: currentRide.drop.latitude,
+        longitude: currentRide.drop.longitude,
+        type: currentRide.drop.type || '',
+      };
+    
+      socket.emit("ride_accepted_with_details", {
+        rideId: data.rideId,
+        userId: currentRide.userId,
+        pickup: safePickup,
+        drop: safeDrop,
+        rideType: currentRide.rideType,
+        price: currentRide.price,
+        driverId: data.driverId,
+        driverName: data.driverName || "Driver",
+        driverPhone: data.driverPhone || "+1234567890",
+        estimatedArrival: data.estimatedArrival || "5 minutes",
+        status: RIDE_STATES.ACCEPTED,
+        createdAt: currentRide.createdAt
+      });
+
+      // Notify all drivers that ride is taken
+      io.to("drivers").emit("ride_taken", {
+        rideId: data.rideId,
+        driverId: data.driverId
+      });
+
+      // Clean up ride request tracking
+      rideRequestRecipients.delete(data.rideId);
+      rideAcceptanceAttempts.delete(data.rideId);
+
+      logEvent('RIDE_ACCEPTANCE_COMPLETE', { rideId: data.rideId, driverId: data.driverId });
+    } finally {
+      // Always remove lock after processing
+      rideLocks.delete(data.rideId);
+    }
+  });
+
+  // Event: Driver rejects a ride request
+  socket.on("reject_ride", (data) => {
+    logEvent('DRIVER_REJECT_RIDE', { rideId: data.rideId, driverId: data.driverId });
+    
+    socket.emit("ride_reject_confirmed", {
+      rideId: data.rideId,
+      response: "rejected"
+    });
+    
+    // Remove this driver from the recipients list for this ride
+    const recipients = rideRequestRecipients.get(data.rideId);
+    if (recipients) {
+      recipients.delete(data.driverId);
+      if (recipients.size === 0) {
+        rideRequestRecipients.delete(data.rideId);
       }
     }
   });
 
-  // Handle ride cancellation
+  // ========================================
+  // RIDE STATUS UPDATES - DRIVER EVENTS
+  // ========================================
+
+  // Event: Driver arrives at pickup location
+  socket.on("driver_arrived", (data) => {
+    logEvent('DRIVER_ARRIVED', { rideId: data.rideId, driverId: data.driverId });
+    
+    const updateResult = updateRideState(data.rideId, RIDE_STATES.ARRIVED);
+    if (updateResult.success) {
+      // Notify customer
+      io.to(`user:${updateResult.ride.userId}`).emit("driver_arrived", {
+        rideId: data.rideId,
+        driverId: data.driverId,
+        message: "Driver has arrived at pickup location",
+        status: RIDE_STATES.ARRIVED
+      });
+      
+      // Notify driver
+      socket.emit("ride_status_updated", {
+        rideId: data.rideId,
+        status: RIDE_STATES.ARRIVED,
+        message: "You have arrived at pickup location"
+      });
+    } else {
+      socket.emit("ride_status_error", { message: updateResult.error });
+    }
+  });
+
+  // Event: Driver starts the ride (picks up passenger)
+  socket.on("start_ride", (data) => {
+    logEvent('RIDE_STARTED', { rideId: data.rideId, driverId: data.driverId });
+    
+    const updateResult = updateRideState(data.rideId, RIDE_STATES.STARTED);
+    if (updateResult.success) {
+      // Notify customer
+      io.to(`user:${updateResult.ride.userId}`).emit("ride_started", {
+        rideId: data.rideId,
+        driverId: data.driverId,
+        message: "Ride has started",
+        status: RIDE_STATES.STARTED
+      });
+      
+      // Notify driver
+      socket.emit("ride_status_updated", {
+        rideId: data.rideId,
+        status: RIDE_STATES.STARTED,
+        message: "Ride has started"
+      });
+    } else {
+      socket.emit("ride_status_error", { message: updateResult.error });
+    }
+  });
+
+  // Event: Driver completes the ride
+  socket.on("complete_ride", (data) => {
+    logEvent('COMPLETE_RIDE_REQUEST', data);
+    
+    const ride = activeRides.get(data.rideId);
+    if (!ride) {
+      logEvent('RIDE_NOT_FOUND_COMPLETE', { rideId: data.rideId });
+      socket.emit("ride_completion_error", {
+        message: "Ride not found or already completed"
+      });
+      return;
+    }
+    
+    if (ride.status === RIDE_STATES.STARTED && ride.driverId === data.driverId) {
+      const updateResult = updateRideState(data.rideId, RIDE_STATES.COMPLETED);
+      if (updateResult.success) {
+        logEvent('RIDE_COMPLETED', { rideId: data.rideId, driverId: data.driverId });
+        
+        // Mark driver as available again
+        resetDriverStatus(data.driverId);
+        
+        // Notify customer
+        io.to(`user:${ride.userId}`).emit("ride_completed", {
+          rideId: data.rideId,
+          message: "Ride completed successfully",
+          status: RIDE_STATES.COMPLETED,
+          timestamp: Date.now()
+        });
+        
+        // Notify driver
+        socket.emit("ride_completed", {
+          rideId: data.rideId,
+          message: "Ride completed successfully",
+          status: RIDE_STATES.COMPLETED,
+          timestamp: Date.now()
+        });
+        
+        // Clean up ride data
+        cleanupRide(data.rideId, ride.userId);
+        
+        logEvent('RIDE_COMPLETION_COMPLETE', { rideId: data.rideId });
+      } else {
+        socket.emit("ride_completion_error", { message: updateResult.error });
+      }
+    } else {
+      logEvent('CANNOT_COMPLETE_RIDE', { rideId: data.rideId, status: ride.status, driverId: ride.driverId });
+      socket.emit("ride_completion_error", {
+        message: "Cannot complete this ride"
+      });
+    }
+  });
+
+  // ========================================
+  // RIDE CANCELLATION - CUSTOMER EVENTS
+  // ========================================
+
+  // Event: Customer cancels a ride
   socket.on("cancel_ride", (data) => {
     logEvent('CANCEL_RIDE_REQUEST', data);
     
@@ -520,7 +710,7 @@ io.on("connection", (socket) => {
     }
     
     // Check if ride is already cancelled
-    if (ride.status === "cancelled") {
+    if (ride.status === RIDE_STATES.CANCELLED) {
       logEvent('RIDE_ALREADY_CANCELLED', { rideId: data.rideId });
       socket.emit("ride_cancellation_error", {
         message: "Ride is already cancelled"
@@ -530,86 +720,50 @@ io.on("connection", (socket) => {
     
     logEvent('RIDE_CANCELLED', { rideId: data.rideId, cancelledBy: ride.userId });
     
-    // Update ride status
-    ride.status = "cancelled";
-    ride.cancelledAt = Date.now();
-    
-    // Notify user
-    io.to(`user:${ride.userId}`).emit("ride_status_update", {
-      rideId: data.rideId,
-      status: "cancelled",
-      message: "Ride cancelled successfully",
-      timestamp: Date.now()
+    // Update ride state to cancelled
+    const updateResult = updateRideState(data.rideId, RIDE_STATES.CANCELLED, {
+      cancelledAt: Date.now()
     });
     
-    // Notify driver if ride was accepted and reset their status
-    if (ride.driverId) {
-      resetDriverStatus(ride.driverId);
-      
-      io.to(`driver:${ride.driverId}`).emit("ride_status_update", {
+    if (updateResult.success) {
+      // Notify customer
+      io.to(`user:${ride.userId}`).emit("ride_cancelled", {
         rideId: data.rideId,
-        status: "cancelled",
-        message: "Ride cancelled by user",
+        status: RIDE_STATES.CANCELLED,
+        message: "Ride cancelled successfully",
         timestamp: Date.now()
       });
       
-      io.to(`driver:${ride.driverId}`).emit("driver_status_reset", {
-        message: "Your status has been reset to available",
-        timestamp: Date.now()
-      });
-    }
-    
-    // Clean up
-    cleanupRide(data.rideId, ride.userId);
-    logEvent('RIDE_CANCELLATION_COMPLETE', { rideId: data.rideId });
-  });
-
-  // Handle ride completion
-  socket.on("complete_ride", (data) => {
-    logEvent('COMPLETE_RIDE_REQUEST', data);
-    
-    const ride = activeRides.get(data.rideId);
-    if (!ride) {
-      logEvent('RIDE_NOT_FOUND_COMPLETE', { rideId: data.rideId });
-      socket.emit("ride_completion_error", {
-        message: "Ride not found or already completed"
-      });
-      return;
-    }
-    
-    if (ride.status === "accepted" && ride.driverId === data.driverId) {
-      logEvent('RIDE_COMPLETED', { rideId: data.rideId, driverId: data.driverId });
+      // Notify driver if ride was accepted and reset their status
+      if (ride.driverId) {
+        resetDriverStatus(ride.driverId);
+        
+        io.to(`driver:${ride.driverId}`).emit("ride_cancelled", {
+          rideId: data.rideId,
+          status: RIDE_STATES.CANCELLED,
+          message: "Ride cancelled by customer",
+          timestamp: Date.now()
+        });
+        
+        io.to(`driver:${ride.driverId}`).emit("driver_status_reset", {
+          message: "Your status has been reset to available",
+          timestamp: Date.now()
+        });
+      }
       
-      // Mark driver as available again
-      resetDriverStatus(data.driverId);
-      
-      // Clean up ride data
+      // Clean up
       cleanupRide(data.rideId, ride.userId);
-      
-      // Notify user and driver
-      io.to(`user:${ride.userId}`).emit("ride_status_update", {
-        rideId: data.rideId,
-        status: "completed",
-        message: "Ride completed successfully",
-        timestamp: Date.now()
-      });
-      
-      socket.emit("ride_completed", {
-        rideId: data.rideId,
-        message: "Ride completed successfully",
-        timestamp: Date.now()
-      });
-      
-      logEvent('RIDE_COMPLETION_COMPLETE', { rideId: data.rideId });
+      logEvent('RIDE_CANCELLATION_COMPLETE', { rideId: data.rideId });
     } else {
-      logEvent('CANNOT_COMPLETE_RIDE', { rideId: data.rideId, status: ride.status, driverId: ride.driverId });
-      socket.emit("ride_completion_error", {
-        message: "Cannot complete this ride"
-      });
+      socket.emit("ride_cancellation_error", { message: updateResult.error });
     }
   });
 
-  // Handle driver location updates
+  // ========================================
+  // LOCATION UPDATES - DRIVER EVENTS
+  // ========================================
+
+  // Event: Driver updates location
   socket.on("driver_location", (data) => {
     logEvent('DRIVER_LOCATION_UPDATE', { driverId: data.driverId, userId: data.userId });
     
@@ -632,192 +786,31 @@ io.on("connection", (socket) => {
     });
   });
 
-  // Handle ride status updates
-  socket.on("ride_status_update", (data) => {
-    logEvent('RIDE_STATUS_UPDATE', data);
-    
-    const ride = activeRides.get(data.rideId);
-    if (ride) {
-      ride.status = data.status;
-      ride.lastUpdated = Date.now();
-      
-      // Notify user
-      io.to(`user:${data.userId}`).emit("ride_status_update", {
-        rideId: data.rideId,
-        status: data.status,
-        message: data.message,
-        timestamp: Date.now()
-      });
-      
-      // If ride is completed or cancelled, clean up
-      if (data.status === "completed" || data.status === "cancelled") {
-        cleanupRide(data.rideId, ride.userId);
-        logEvent('RIDE_CLEANUP_AFTER_STATUS', { rideId: data.rideId, status: data.status });
-      }
-    }
-  });
+  // ========================================
+  // DISCONNECTION HANDLING
+  // ========================================
 
-  // Handle driver status updates
-  socket.on("driver_status", (data) => {
-    logEvent('DRIVER_STATUS_UPDATE', data);
+  socket.on("disconnect", (reason) => {
+    logEvent('DISCONNECT', { socketId: socket.id, type, id, reason });
     
-    const driver = connectedDrivers.get(data.driverId);
-    if (driver) {
-      const previousStatus = driver.status;
-      driver.status = data.status;
-      driver.lastSeen = Date.now();
-      
-      logEvent('DRIVER_STATUS_CHANGED', { driverId: data.driverId, from: previousStatus, to: data.status });
-      
-      // If driver becomes busy, remove them from all pending ride request recipients
-      if (data.status === "busy") {
-        for (const [rideId, recipients] of rideRequestRecipients.entries()) {
-          const ride = activeRides.get(rideId);
-          if (ride && ride.status === "pending") {
-            recipients.delete(data.driverId);
-            if (recipients.size === 0) {
-              rideRequestRecipients.delete(rideId);
-              logEvent('NO_MORE_DRIVERS_FOR_RIDE', { rideId });
-            }
-          }
-        }
-      }
-      
-      // Broadcast to users if needed
-      if (data.status === "offline") {
-        // Notify any users with active rides from this driver
-        for (const [rideId, ride] of activeRides) {
-          if (ride.driverId === data.driverId && ride.status === "accepted") {
-            io.to(`user:${ride.userId}`).emit("driver_offline", {
-              rideId: rideId,
-              driverId: data.driverId
-            });
-          }
-        }
-        
-        // Remove driver from all ride request recipients when they go offline
-        for (const [rideId, recipients] of rideRequestRecipients.entries()) {
-          recipients.delete(data.driverId);
-          if (recipients.size === 0) {
-            rideRequestRecipients.delete(rideId);
-          }
-        }
-      }
-    }
-  });
-
-  // Handle test events
-  socket.on("test_event", (data) => {
-    logEvent('TEST_EVENT', data);
-    socket.emit("test_response", {
-      message: "Hello from Socket.IO server!",
-      timestamp: new Date().toISOString(),
-      received: data,
-      activeRides: activeRides.size,
-      connectedDrivers: connectedDrivers.size,
-      connectedUsers: connectedUsers.size
-    });
-  });
-
-  socket.on("disconnect", () => {
-    logEvent('DISCONNECT', { socketId: socket.id, type, id });
-    
-    // Clean up connections
     if (type === "driver") {
-      socket.leave("drivers");
-      
-      // Check if driver had an active ride and notify the user
-      for (const [rideId, ride] of activeRides.entries()) {
-        if (ride.driverId === id && ride.status === "accepted") {
-          logEvent('DRIVER_DISCONNECTED_WITH_ACTIVE_RIDE', { driverId: id, rideId });
-          io.to(`user:${ride.userId}`).emit("driver_disconnected", {
-            rideId: rideId,
-            driverId: id
-          });
-          
-          // Reset ride status to pending so another driver can accept it
-          ride.status = "pending";
-          ride.driverId = null;
-          ride.acceptedBy = null;
-          
-          // Reset driver status to online in case they reconnect
-          const driver = connectedDrivers.get(id);
-          if (driver) {
-            driver.status = "online";
-          }
+      const driver = connectedDrivers.get(id);
+      if (driver) {
+        // Reset driver status if they were busy
+        if (driver.status === "busy") {
+          resetDriverStatus(id);
         }
+        connectedDrivers.delete(id);
+        logEvent('DRIVER_DISCONNECTED', { driverId: id, totalDrivers: connectedDrivers.size });
       }
-      
-      connectedDrivers.delete(id);
-      
-      // Remove this driver from all ride request recipients
-      for (const [rideId, recipients] of rideRequestRecipients.entries()) {
-        recipients.delete(id);
-        if (recipients.size === 0) {
-          rideRequestRecipients.delete(rideId);
-        }
-      }
-      
-      logEvent('DRIVER_DISCONNECTED', { driverId: id, totalDrivers: connectedDrivers.size });
     } else if (type === "user" || type === "customer") {
-      socket.leave(`user:${id}`);
       connectedUsers.delete(id);
-      
-      // Check if user had an active ride and notify the driver
-      const activeRideId = userActiveRides.get(id);
-      if (activeRideId) {
-        const ride = activeRides.get(activeRideId);
-        if (ride && ride.status === "accepted" && ride.driverId) {
-          logEvent('USER_DISCONNECTED_WITH_ACTIVE_RIDE', { userId: id, rideId: activeRideId });
-          io.to(`driver:${ride.driverId}`).emit("user_disconnected", {
-            rideId: activeRideId,
-            userId: id
-          });
-        }
-        userActiveRides.delete(id);
-      }
-      
       logEvent('USER_DISCONNECTED', { userId: id, totalUsers: connectedUsers.size });
     }
   });
 });
 
-// Health check endpoint
-app.get("/", (req, res) => {
-  res.json({ 
-    status: "ok", 
-    message: "Socket.IO server is running",
-    timestamp: new Date().toISOString(),
-    connections: io.engine.clientsCount,
-    activeRides: activeRides.size,
-    connectedDrivers: connectedDrivers.size,
-    connectedUsers: connectedUsers.size
-  });
-});
-
-app.get("/health", (req, res) => {
-  res.json({ 
-    status: "healthy", 
-    connections: io.engine.clientsCount,
-    uptime: process.uptime(),
-    activeRides: activeRides.size,
-    connectedDrivers: connectedDrivers.size,
-    connectedUsers: connectedUsers.size
-  });
-});
-
-// API endpoint to get server stats
-app.get("/stats", (req, res) => {
-  res.json({
-    activeRides: Array.from(activeRides.entries()),
-    connectedDrivers: Array.from(connectedDrivers.entries()),
-    connectedUsers: Array.from(connectedUsers.entries())
-  });
-});
-
-const server = app.listen(PORT, () => {
+// Start the server
+app.listen(PORT, () => {
   logEvent('SERVER_LISTENING', { port: PORT });
 });
-
-io.attach(server);
-logEvent('SOCKET_IO_ATTACHED', { port: PORT });
