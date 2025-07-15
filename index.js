@@ -24,6 +24,21 @@ app.use((req, res, next) => {
   next();
 });
 
+// Add debug endpoint to check socket connections
+app.get('/debug/sockets', (req, res) => {
+  const debugInfo = {
+    connectedUsers: Array.from(connectedUsers.entries()),
+    connectedDrivers: Array.from(connectedDrivers.entries()),
+    activeRides: Array.from(activeRides.entries()),
+    rooms: Array.from(io.sockets.adapter.rooms.entries()).map(([room, sockets]) => ({
+      room,
+      socketCount: sockets.size,
+      sockets: Array.from(sockets)
+    }))
+  };
+  res.json(debugInfo);
+});
+
 const io = new Server({
   cors: {
     origin: "*", // allow all origins for dev; restrict in prod
@@ -124,6 +139,13 @@ io.on("connection", (socket) => {
       lastSeen: Date.now()
     });
     console.log(`👤 User ${id} connected and joined room user:${id}. Total users: ${connectedUsers.size}`);
+    
+    // Verify room joining
+    const userRoom = io.sockets.adapter.rooms.get(`user:${id}`);
+    console.log(`🔍 User room user:${id} created:`, !!userRoom);
+    if (userRoom) {
+      console.log(`👥 Users in room user:${id}:`, Array.from(userRoom));
+    }
   }
 
   // Handle ride booking
@@ -274,13 +296,22 @@ io.on("connection", (socket) => {
 
         // Notify user
         console.log(`📢 Emitting ride_accepted to user:${ride.userId}`);
-        io.to(`user:${ride.userId}`).emit("ride_accepted", {
+        const notificationData = {
           rideId: data.rideId,
           driverId: data.driverId,
           driverName: data.driverName,
           driverPhone: data.driverPhone,
           estimatedArrival: data.estimatedArrival
-        });
+        };
+        console.log(`📤 Notification data being sent:`, JSON.stringify(notificationData, null, 2));
+        io.to(`user:${ride.userId}`).emit("ride_accepted", notificationData);
+        
+        // Check if user room exists
+        const userRoom = io.sockets.adapter.rooms.get(`user:${ride.userId}`);
+        console.log(`🔍 User room user:${ride.userId} exists:`, !!userRoom);
+        if (userRoom) {
+          console.log(`👥 Users in room user:${ride.userId}:`, Array.from(userRoom));
+        }
 
         // Send complete ride details to the accepting driver
         console.log(`📢 Emitting ride_accepted_with_details to driver:${data.driverId}`);
