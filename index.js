@@ -18,6 +18,48 @@ const rideLocks = new Set();
 // Track which drivers have already received each ride request
 const rideRequestRecipients = new Map();
 
+// Track user's active ride requests to prevent duplicates
+const userActiveRides = new Map();
+
+// Add cleanup interval for stale rides and locks
+setInterval(() => {
+  const now = Date.now();
+  
+  // Clean up stale ride locks (older than 30 seconds)
+  for (const rideId of rideLocks) {
+    const ride = activeRides.get(rideId);
+    if (ride && (now - ride.createdAt) > 30000) {
+      console.log(`🧹 Cleaning up stale ride lock: ${rideId}`);
+      rideLocks.delete(rideId);
+    }
+  }
+  
+  // Clean up old pending rides (older than 5 minutes)
+  for (const [rideId, ride] of activeRides.entries()) {
+    if (ride.status === "pending" && (now - ride.createdAt) > 300000) {
+      console.log(`🧹 Cleaning up old pending ride: ${rideId}`);
+      activeRides.delete(rideId);
+      rideRequestRecipients.delete(rideId);
+      rideLocks.delete(rideId);
+      userActiveRides.delete(ride.userId); // Clean up user's active ride request
+      
+      // Notify user that ride request expired
+      io.to(`user:${ride.userId}`).emit("ride_timeout", {
+        rideId: rideId,
+        message: "Ride request expired. Please try again."
+      });
+    }
+  }
+  
+  // Clean up stale user active rides entries
+  for (const [userId, rideId] of userActiveRides.entries()) {
+    if (!activeRides.has(rideId)) {
+      console.log(`🧹 Cleaning up stale user active ride entry: ${userId} -> ${rideId}`);
+      userActiveRides.delete(userId);
+    }
+  }
+}, 30000); // Run every 30 seconds
+
 // Add request logging middleware
 app.use((req, res, next) => {
   console.log(`📥 ${req.method} ${req.path} - ${new Date().toISOString()}`);
@@ -30,6 +72,13 @@ app.get('/debug/sockets', (req, res) => {
     connectedUsers: Array.from(connectedUsers.entries()),
     connectedDrivers: Array.from(connectedDrivers.entries()),
     activeRides: Array.from(activeRides.entries()),
+    userActiveRides: Array.from(userActiveRides.entries()),
+    rideLocks: Array.from(rideLocks),
+    rideRequestRecipients: Array.from(rideRequestRecipients.entries()).map(([rideId, recipients]) => ({
+      rideId,
+      recipientCount: recipients.size,
+      recipients: Array.from(recipients)
+    })),
     rooms: Array.from(io.sockets.adapter.rooms.entries()).map(([room, sockets]) => ({
       room,
       socketCount: sockets.size,
@@ -100,6 +149,22 @@ const getUserTypeDisplay = (type) => {
       return type;
   }
 };
+
+// Helper function to log server state
+const logServerState = () => {
+  console.log(`📊 Server State:`, {
+    activeRides: activeRides.size,
+    connectedDrivers: connectedDrivers.size,
+    connectedUsers: connectedUsers.size,
+    rideLocks: rideLocks.size,
+    rideRequestRecipients: rideRequestRecipients.size,
+    userActiveRides: userActiveRides.size,
+    timestamp: new Date().toISOString()
+  });
+};
+
+// Log server state every 30 seconds
+setInterval(logServerState, 30000);
 
 io.on("connection", (socket) => {
   // Log socket id and handshake details
@@ -172,6 +237,22 @@ io.on("connection", (socket) => {
       price: data.price
     });
     
+    // Check if user already has an active ride request
+    const existingRide = userActiveRides.get(data.userId);
+    if (existingRide) {
+      const ride = activeRides.get(existingRide);
+      if (ride && ride.status === "pending") {
+        console.log("❌ User already has an active ride request:", data.userId);
+        socket.emit("ride_response_error", {
+          message: "You already have an active ride request. Please wait or cancel the existing request."
+        });
+        return;
+      } else {
+        // Clean up stale entry
+        userActiveRides.delete(data.userId);
+      }
+    }
+    
     // Validate ride data
     const validation = validateRideData(data);
     if (!validation.valid) {
@@ -201,6 +282,7 @@ io.on("connection", (socket) => {
     };
     
     activeRides.set(rideId, rideData);
+    userActiveRides.set(data.userId, rideId);
     logRideEvent('CREATED', rideId, { userId: data.userId, price: data.price });
     
     // Emit back to the user that ride is booked
@@ -287,6 +369,7 @@ io.on("connection", (socket) => {
 
     // Locking logic to prevent race conditions
     if (data.response === "accept") {
+      // Check if ride is already locked or accepted
       if (rideLocks.has(data.rideId)) {
         console.log("🚫 Ride is being processed by another driver:", data.rideId);
         socket.emit("ride_response_error", {
@@ -295,89 +378,102 @@ io.on("connection", (socket) => {
         return;
       }
       
-      rideLocks.add(data.rideId);
-      
-      // Check if ride is still available
-      if (ride.status === "pending") {
-        ride.status = "accepted";
-        ride.acceptedBy = data.driverId;
-        ride.driverId = data.driverId;
-        ride.acceptedAt = Date.now();
-
-        logRideEvent('ACCEPTED', data.rideId, { 
-          driverId: data.driverId,
-          driverName: data.driverName 
-        });
-
-        // Notify user
-        console.log(`📢 Emitting ride_accepted to user:${ride.userId}`);
-        const notificationData = {
-          rideId: data.rideId,
-          driverId: data.driverId,
-          driverName: data.driverName || "Driver",
-          driverPhone: data.driverPhone || "+1234567890",
-          estimatedArrival: data.estimatedArrival || "5 minutes"
-        };
-        console.log(`📤 Notification data being sent:`, JSON.stringify(notificationData, null, 2));
-        io.to(`user:${ride.userId}`).emit("ride_accepted", notificationData);
-        
-        // Check if user room exists
-        const userRoom = io.sockets.adapter.rooms.get(`user:${ride.userId}`);
-        console.log(`🔍 User room user:${ride.userId} exists:`, !!userRoom);
-        if (userRoom) {
-          console.log(`👥 Users in room user:${ride.userId}:`, Array.from(userRoom));
-        }
-
-        // Send complete ride details to the accepting driver
-        console.log(`📢 Emitting ride_accepted_with_details to driver:${data.driverId}`);
-        // Ensure pickup and drop have address and name
-        const safePickup = {
-          latitude: ride.pickup.latitude,
-          longitude: ride.pickup.longitude,
-          address: ride.pickup.address || ride.pickup.name || 'Unknown Address',
-          name: ride.pickup.name || ride.pickup.address || 'Unknown Name',
-        };
-        const safeDrop = {
-          id: ride.drop.id || 'dest_1',
-          name: ride.drop.name || ride.drop.address || 'Unknown Name',
-          address: ride.drop.address || ride.drop.name || 'Unknown Address',
-          latitude: ride.drop.latitude,
-          longitude: ride.drop.longitude,
-          type: ride.drop.type || '',
-        };
-        socket.emit("ride_accepted_with_details", {
-          rideId: data.rideId,
-          userId: ride.userId,
-          pickup: safePickup,
-          drop: safeDrop,
-          rideType: ride.rideType,
-          price: ride.price,
-          driverId: data.driverId,
-          driverName: data.driverName || "Driver",
-          driverPhone: data.driverPhone || "+1234567890",
-          estimatedArrival: data.estimatedArrival || "5 minutes",
-          status: ride.status,
-          createdAt: ride.createdAt
-        });
-
-        // Notify all drivers that ride is taken
-        io.to("drivers").emit("ride_taken", {
-          rideId: data.rideId,
-          driverId: data.driverId
-        });
-
-        // Clean up ride request tracking
-        rideRequestRecipients.delete(data.rideId);
-
-        console.log(`✅ Ride ${data.rideId} accepted by driver ${data.driverId}`);
-      } else {
+      // Check if ride is already accepted
+      if (ride.status !== "pending") {
         console.log("❌ Ride already accepted by another driver:", data.rideId);
         socket.emit("ride_response_error", {
           message: "Ride already accepted by another driver"
         });
+        return;
       }
-      // Remove lock after processing
-      rideLocks.delete(data.rideId);
+      
+      // Add lock before processing
+      rideLocks.add(data.rideId);
+      
+      try {
+        // Double-check ride status after acquiring lock
+        if (ride.status === "pending") {
+          ride.status = "accepted";
+          ride.acceptedBy = data.driverId;
+          ride.driverId = data.driverId;
+          ride.acceptedAt = Date.now();
+
+          logRideEvent('ACCEPTED', data.rideId, { 
+            driverId: data.driverId,
+            driverName: data.driverName 
+          });
+
+          // Notify user
+          console.log(`📢 Emitting ride_accepted to user:${ride.userId}`);
+          const notificationData = {
+            rideId: data.rideId,
+            driverId: data.driverId,
+            driverName: data.driverName || "Driver",
+            driverPhone: data.driverPhone || "+1234567890",
+            estimatedArrival: data.estimatedArrival || "5 minutes"
+          };
+          console.log(`📤 Notification data being sent:`, JSON.stringify(notificationData, null, 2));
+          io.to(`user:${ride.userId}`).emit("ride_accepted", notificationData);
+          
+          // Check if user room exists
+          const userRoom = io.sockets.adapter.rooms.get(`user:${ride.userId}`);
+          console.log(`🔍 User room user:${ride.userId} exists:`, !!userRoom);
+          if (userRoom) {
+            console.log(`👥 Users in room user:${ride.userId}:`, Array.from(userRoom));
+          }
+
+          // Send complete ride details to the accepting driver
+          console.log(`📢 Emitting ride_accepted_with_details to driver:${data.driverId}`);
+          // Ensure pickup and drop have address and name
+          const safePickup = {
+            latitude: ride.pickup.latitude,
+            longitude: ride.pickup.longitude,
+            address: ride.pickup.address || ride.pickup.name || 'Unknown Address',
+            name: ride.pickup.name || ride.pickup.address || 'Unknown Name',
+          };
+          const safeDrop = {
+            id: ride.drop.id || 'dest_1',
+            name: ride.drop.name || ride.drop.address || 'Unknown Name',
+            address: ride.drop.address || ride.drop.name || 'Unknown Address',
+            latitude: ride.drop.latitude,
+            longitude: ride.drop.longitude,
+            type: ride.drop.type || '',
+          };
+          socket.emit("ride_accepted_with_details", {
+            rideId: data.rideId,
+            userId: ride.userId,
+            pickup: safePickup,
+            drop: safeDrop,
+            rideType: ride.rideType,
+            price: ride.price,
+            driverId: data.driverId,
+            driverName: data.driverName || "Driver",
+            driverPhone: data.driverPhone || "+1234567890",
+            estimatedArrival: data.estimatedArrival || "5 minutes",
+            status: ride.status,
+            createdAt: ride.createdAt
+          });
+
+          // Notify all drivers that ride is taken
+          io.to("drivers").emit("ride_taken", {
+            rideId: data.rideId,
+            driverId: data.driverId
+          });
+
+          // Clean up ride request tracking
+          rideRequestRecipients.delete(data.rideId);
+
+          console.log(`✅ Ride ${data.rideId} accepted by driver ${data.driverId}`);
+        } else {
+          console.log("❌ Ride status changed while processing:", data.rideId);
+          socket.emit("ride_response_error", {
+            message: "Ride already accepted by another driver"
+          });
+        }
+      } finally {
+        // Always remove lock after processing
+        rideLocks.delete(data.rideId);
+      }
     } else if (data.response === "reject") {
       // Log rejection (could be used for analytics)
       console.log(`❌ Driver ${data.driverId} rejected ride ${data.rideId}`);
@@ -440,6 +536,7 @@ io.on("connection", (socket) => {
     activeRides.delete(data.rideId);
     rideRequestRecipients.delete(data.rideId);
     rideLocks.delete(data.rideId);
+    userActiveRides.delete(ride.userId); // Clean up user's active ride request
     
     console.log(`✅ Ride ${data.rideId} cancelled successfully`);
   });
@@ -488,6 +585,7 @@ io.on("connection", (socket) => {
       if (data.status === "completed" || data.status === "cancelled") {
         activeRides.delete(data.rideId);
         rideRequestRecipients.delete(data.rideId);
+        userActiveRides.delete(ride.userId); // Clean up user's active ride request
         console.log(`🧹 Cleaned up ride ${data.rideId}`);
       }
     }
@@ -550,6 +648,7 @@ io.on("connection", (socket) => {
     } else if (type === "user" || type === "customer") {
       socket.leave(`user:${id}`);
       connectedUsers.delete(id);
+      userActiveRides.delete(id); // Clean up user's active ride request on disconnect
       console.log(`👤 ${userTypeDisplay} ${id} disconnected. Total users: ${connectedUsers.size}`);
     }
   });
