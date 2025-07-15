@@ -184,6 +184,30 @@ const logServerState = () => {
 // Log server state every 30 seconds
 setInterval(logServerState, 30000);
 
+// Clean up stale rides every 2 minutes
+setInterval(() => {
+  const now = Date.now();
+  let cleanedCount = 0;
+  
+  for (const [rideId, ride] of activeRides.entries()) {
+    const age = now - ride.createdAt;
+    // Clean up rides older than 10 minutes
+    if (age > 600000) { // 10 minutes
+      console.log(`🧹 Cleaning up stale ride ${rideId} (age: ${Math.round(age/1000)}s)`);
+      activeRides.delete(rideId);
+      rideRequestRecipients.delete(rideId);
+      rideLocks.delete(rideId);
+      rideAcceptanceAttempts.delete(rideId);
+      userActiveRides.delete(ride.userId);
+      cleanedCount++;
+    }
+  }
+  
+  if (cleanedCount > 0) {
+    console.log(`🧹 Cleaned up ${cleanedCount} stale rides`);
+  }
+}, 120000); // 2 minutes
+
 io.on("connection", (socket) => {
   // Log socket id and handshake details
   console.log("🔗 New connection:", {
@@ -657,12 +681,25 @@ io.on("connection", (socket) => {
       timestamp: Date.now()
     });
     
-    // Notify driver if ride was accepted
+    // Notify driver if ride was accepted and reset their status
     if (ride.driverId) {
+      // Reset driver status to online if they were busy with this ride
+      const driver = connectedDrivers.get(ride.driverId);
+      if (driver && driver.status === "busy") {
+        driver.status = "online";
+        console.log(`🟢 Driver ${ride.driverId} status reset to online after ride cancellation`);
+      }
+      
       io.to(`driver:${ride.driverId}`).emit("ride_status_update", {
         rideId: data.rideId,
         status: "cancelled",
         message: "Ride cancelled by user",
+        timestamp: Date.now()
+      });
+      
+      // Also emit a specific event to reset driver status
+      io.to(`driver:${ride.driverId}`).emit("driver_status_reset", {
+        message: "Your status has been reset to available",
         timestamp: Date.now()
       });
     }
@@ -675,6 +712,13 @@ io.on("connection", (socket) => {
     userActiveRides.delete(ride.userId); // Clean up user's active ride request
     
     console.log(`✅ Ride ${data.rideId} cancelled successfully`);
+    console.log(`📊 Server state after cancellation:`, {
+      activeRides: activeRides.size,
+      rideRequestRecipients: rideRequestRecipients.size,
+      userActiveRides: userActiveRides.size,
+      connectedDrivers: connectedDrivers.size,
+      connectedUsers: connectedUsers.size
+    });
   });
 
   // Handle ride completion
