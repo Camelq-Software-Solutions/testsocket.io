@@ -887,15 +887,6 @@ io.on("connection", (socket) => {
   socket.on("cancel_ride", (data) => {
     logEvent('CANCEL_RIDE_REQUEST', data);
     
-    const ride = activeRides.get(data.rideId);
-    if (!ride) {
-      logEvent('RIDE_NOT_FOUND_CANCEL', { rideId: data.rideId });
-      socket.emit("ride_cancellation_error", {
-        message: "Ride not found or already cancelled"
-      });
-      return;
-    }
-    
     // Check if ride is locked
     if (rideLocks.has(data.rideId)) {
       logEvent('RIDE_LOCKED_CANCEL', { rideId: data.rideId });
@@ -905,53 +896,58 @@ io.on("connection", (socket) => {
       return;
     }
     
-    // Check if ride is already cancelled
-    if (ride.status === RIDE_STATES.CANCELLED) {
-      logEvent('RIDE_ALREADY_CANCELLED', { rideId: data.rideId });
-      socket.emit("ride_cancellation_error", {
-        message: "Ride is already cancelled"
+    // Use enhanced cancellation handler
+    const result = handleRideCancellation(data.rideId, 'USER', data.reason || '');
+    
+    if (result.success) {
+      logEvent('RIDE_CANCELLATION_COMPLETE', { 
+        rideId: data.rideId, 
+        cancelledBy: 'USER',
+        fee: result.cancellationFee 
+      });
+      socket.emit("ride_cancellation_success", {
+        message: result.message,
+        cancellationFee: result.cancellationFee
+      });
+    } else {
+      logEvent('RIDE_CANCELLATION_FAILED', { rideId: data.rideId, error: result.error });
+      socket.emit("ride_cancellation_error", { message: result.error });
+    }
+  });
+
+  // ========================================
+  // DRIVER CANCELLATION - DRIVER EVENTS
+  // ========================================
+
+  // Event: Driver cancels a ride
+  socket.on("driver_cancel_ride", (data) => {
+    logEvent('DRIVER_CANCEL_RIDE_REQUEST', data);
+    
+    // Check if ride is locked
+    if (rideLocks.has(data.rideId)) {
+      logEvent('RIDE_LOCKED_DRIVER_CANCEL', { rideId: data.rideId });
+      socket.emit("driver_cancellation_error", {
+        message: "Ride is currently being processed. Please wait a moment."
       });
       return;
     }
     
-    logEvent('RIDE_CANCELLED', { rideId: data.rideId, cancelledBy: ride.userId });
+    // Use enhanced cancellation handler
+    const result = handleRideCancellation(data.rideId, 'DRIVER', data.reason || '');
     
-    // Update ride state to cancelled
-    const updateResult = updateRideState(data.rideId, RIDE_STATES.CANCELLED, {
-      cancelledAt: Date.now()
-    });
-    
-    if (updateResult.success) {
-      // Notify customer
-      io.to(`user:${ride.userId}`).emit("ride_cancelled", {
-        rideId: data.rideId,
-        status: RIDE_STATES.CANCELLED,
-        message: "Ride cancelled successfully",
-        timestamp: Date.now()
+    if (result.success) {
+      logEvent('DRIVER_CANCELLATION_COMPLETE', { 
+        rideId: data.rideId, 
+        cancelledBy: 'DRIVER',
+        fee: result.cancellationFee 
       });
-      
-      // Notify driver if ride was accepted and reset their status
-      if (ride.driverId) {
-        resetDriverStatus(ride.driverId);
-        
-        io.to(`driver:${ride.driverId}`).emit("ride_cancelled", {
-          rideId: data.rideId,
-          status: RIDE_STATES.CANCELLED,
-          message: "Ride cancelled by customer",
-          timestamp: Date.now()
-        });
-        
-        io.to(`driver:${ride.driverId}`).emit("driver_status_reset", {
-          message: "Your status has been reset to available",
-          timestamp: Date.now()
-        });
-      }
-      
-      // Clean up
-      cleanupRide(data.rideId, ride.userId);
-      logEvent('RIDE_CANCELLATION_COMPLETE', { rideId: data.rideId });
+      socket.emit("driver_cancellation_success", {
+        message: result.message,
+        cancellationFee: result.cancellationFee
+      });
     } else {
-      socket.emit("ride_cancellation_error", { message: updateResult.error });
+      logEvent('DRIVER_CANCELLATION_FAILED', { rideId: data.rideId, error: result.error });
+      socket.emit("driver_cancellation_error", { message: result.error });
     }
   });
 
@@ -1158,6 +1154,112 @@ app.get('/debug/state', (req, res) => {
   
   res.json(state);
 });
+
+// Cancellation fee rules
+const CANCELLATION_FEE_RULES = {
+  USER: {
+    BEFORE_DRIVER_ASSIGNMENT: 0,
+    AFTER_DRIVER_ASSIGNMENT: 10, // ₹10
+    AFTER_DRIVER_ARRIVAL: 25,    // ₹25
+    AFTER_RIDE_START: null       // Cannot cancel
+  },
+  DRIVER: {
+    BEFORE_ARRIVAL: 0,
+    AFTER_ARRIVAL: 50,           // ₹50 penalty
+    AFTER_RIDE_START: null       // Cannot cancel
+  }
+};
+
+// Calculate cancellation fee based on ride state and who cancelled
+const calculateCancellationFee = (ride, cancelledBy) => {
+  if (!ride) return 0;
+  
+  const rules = CANCELLATION_FEE_RULES[cancelledBy];
+  if (!rules) return 0;
+  
+  switch (ride.status) {
+    case RIDE_STATES.SEARCHING:
+      return rules.BEFORE_DRIVER_ASSIGNMENT;
+    case RIDE_STATES.ACCEPTED:
+      return rules.AFTER_DRIVER_ASSIGNMENT;
+    case RIDE_STATES.ARRIVED:
+      return cancelledBy === 'USER' ? rules.AFTER_DRIVER_ARRIVAL : rules.AFTER_ARRIVAL;
+    case RIDE_STATES.STARTED:
+    case RIDE_STATES.COMPLETED:
+      return null; // Cannot cancel
+    default:
+      return 0;
+  }
+};
+
+// Enhanced cancellation handler
+const handleRideCancellation = (rideId, cancelledBy, reason = '') => {
+  const ride = activeRides.get(rideId);
+  if (!ride) {
+    return { success: false, error: 'Ride not found' };
+  }
+  
+  // Check if ride can be cancelled
+  if (ride.status === RIDE_STATES.STARTED || ride.status === RIDE_STATES.COMPLETED) {
+    return { success: false, error: 'Ride cannot be cancelled at this stage' };
+  }
+  
+  // Calculate cancellation fee
+  const cancellationFee = calculateCancellationFee(ride, cancelledBy);
+  if (cancellationFee === null) {
+    return { success: false, error: 'Ride cannot be cancelled at this stage' };
+  }
+  
+  // Update ride state
+  const updateResult = updateRideState(rideId, RIDE_STATES.CANCELLED, {
+    cancelledAt: Date.now(),
+    cancelledBy: cancelledBy,
+    cancellationReason: reason,
+    cancellationFee: cancellationFee
+  });
+  
+  if (!updateResult.success) {
+    return updateResult;
+  }
+  
+  // Notify user
+  io.to(`user:${ride.userId}`).emit("ride_cancelled", {
+    rideId: rideId,
+    status: RIDE_STATES.CANCELLED,
+    message: `Ride cancelled by ${cancelledBy.toLowerCase()}`,
+    cancellationFee: cancellationFee,
+    cancellationReason: reason,
+    timestamp: Date.now()
+  });
+  
+  // Notify driver if ride was accepted
+  if (ride.driverId) {
+    resetDriverStatus(ride.driverId);
+    
+    io.to(`driver:${ride.driverId}`).emit("ride_cancelled", {
+      rideId: rideId,
+      status: RIDE_STATES.CANCELLED,
+      message: `Ride cancelled by ${cancelledBy.toLowerCase()}`,
+      cancellationFee: cancellationFee,
+      cancellationReason: reason,
+      timestamp: Date.now()
+    });
+    
+    io.to(`driver:${ride.driverId}`).emit("driver_status_reset", {
+      message: "Your status has been reset to available",
+      timestamp: Date.now()
+    });
+  }
+  
+  // Clean up
+  cleanupRide(rideId, ride.userId);
+  
+  return { 
+    success: true, 
+    cancellationFee: cancellationFee,
+    message: `Ride cancelled successfully. ${cancellationFee > 0 ? `Cancellation fee: ₹${cancellationFee}` : 'No cancellation fee.'}`
+  };
+};
 
 // Create HTTP server and attach Socket.IO
 const server = require('http').createServer(app);
