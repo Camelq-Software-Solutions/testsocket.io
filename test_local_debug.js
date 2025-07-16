@@ -1,7 +1,7 @@
 const io = require('socket.io-client');
 
 // Test configuration - LOCAL SERVER
-const SERVER_URL = 'http://localhost:9092';
+const SERVER_URL = 'http://192.168.1.27:9092';
 const TEST_USER_ID = 'user_2zv6uUEVerLOtFV1A3ZfMuOo05o';
 const TEST_DRIVER_ID = 'user_2zmThgmdF5YItg7OoypHCaDt3KH';
 

@@ -2,7 +2,7 @@ const { Server } = require("socket.io");
 const express = require("express");
 
 const app = express();
-const PORT = process.env.PORT || 9092;
+const PORT = process.env.PORT || 3000;
 
 // Basic middleware
 app.use(express.json());
@@ -1067,6 +1067,6 @@ const server = require('http').createServer(app);
 io.attach(server);
 
 // Start the server
-server.listen(PORT, () => {
+server.listen(PORT, '0.0.0.0', () => {
   logEvent('SERVER_LISTENING', { port: PORT });
 });
