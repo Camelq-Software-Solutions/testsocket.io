@@ -705,7 +705,104 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Event: Driver starts the ride (picks up passenger)
+  // Event: Driver sends OTP for verification
+  socket.on("send_otp", (data) => {
+    logEvent('DRIVER_SENT_OTP', { rideId: data.rideId, driverId: data.driverId, otp: data.otp });
+    
+    const ride = activeRides.get(data.rideId);
+    if (!ride) {
+      logEvent('RIDE_NOT_FOUND_OTP', { rideId: data.rideId });
+      socket.emit("otp_error", { message: "Ride not found" });
+      return;
+    }
+    
+    if (ride.driverId !== data.driverId) {
+      logEvent('DRIVER_MISMATCH_OTP', { rideId: data.rideId, driverId: data.driverId, expectedDriver: ride.driverId });
+      socket.emit("otp_error", { message: "Unauthorized driver" });
+      return;
+    }
+    
+    // Store the OTP for verification
+    ride.driverOtp = data.otp;
+    ride.otpTimestamp = Date.now();
+    
+    logEvent('OTP_STORED', { rideId: data.rideId, otp: data.otp });
+    
+    // Notify driver that OTP was sent successfully
+    socket.emit("otp_sent", {
+      rideId: data.rideId,
+      message: "OTP sent successfully, waiting for customer verification"
+    });
+  });
+
+  // Event: Customer verifies MPIN
+  socket.on("verify_mpin", (data) => {
+    logEvent('CUSTOMER_VERIFY_MPIN', { rideId: data.rideId, mpin: data.mpin });
+    
+    const ride = activeRides.get(data.rideId);
+    if (!ride) {
+      logEvent('RIDE_NOT_FOUND_MPIN', { rideId: data.rideId });
+      socket.emit("mpin_error", { message: "Ride not found" });
+      return;
+    }
+    
+    if (ride.userId !== data.userId) {
+      logEvent('USER_MISMATCH_MPIN', { rideId: data.rideId, userId: data.userId, expectedUser: ride.userId });
+      socket.emit("mpin_error", { message: "Unauthorized user" });
+      return;
+    }
+    
+    // Check if driver OTP exists and matches
+    if (!ride.driverOtp) {
+      logEvent('NO_DRIVER_OTP', { rideId: data.rideId });
+      socket.emit("mpin_error", { message: "Driver has not sent OTP yet" });
+      return;
+    }
+    
+    // Check if OTP is expired (5 minutes)
+    const otpAge = Date.now() - ride.otpTimestamp;
+    if (otpAge > 5 * 60 * 1000) {
+      logEvent('OTP_EXPIRED', { rideId: data.rideId, age: Math.round(otpAge/1000) });
+      socket.emit("mpin_error", { message: "OTP has expired, please ask driver to send again" });
+      return;
+    }
+    
+    // Verify MPIN matches OTP
+    if (data.mpin === ride.driverOtp) {
+      logEvent('MPIN_VERIFIED', { rideId: data.rideId, mpin: data.mpin });
+      
+      // Update ride state to started
+      const updateResult = updateRideState(data.rideId, RIDE_STATES.STARTED);
+      if (updateResult.success) {
+        // Notify customer
+        socket.emit("mpin_verified", {
+          rideId: data.rideId,
+          message: "MPIN verified successfully, ride started",
+          status: RIDE_STATES.STARTED
+        });
+        
+        // Notify driver
+        io.to(`driver:${ride.driverId}`).emit("mpin_verified", {
+          rideId: data.rideId,
+          message: "Customer verified MPIN, ride started",
+          status: RIDE_STATES.STARTED
+        });
+        
+        // Clean up OTP data
+        delete ride.driverOtp;
+        delete ride.otpTimestamp;
+        
+        logEvent('RIDE_STARTED_VIA_MPIN', { rideId: data.rideId, driverId: ride.driverId });
+      } else {
+        socket.emit("mpin_error", { message: updateResult.error });
+      }
+    } else {
+      logEvent('MPIN_MISMATCH', { rideId: data.rideId, providedMpin: data.mpin, expectedOtp: ride.driverOtp });
+      socket.emit("mpin_error", { message: "Incorrect MPIN, please try again" });
+    }
+  });
+
+  // Event: Driver starts the ride (picks up passenger) - Legacy method
   socket.on("start_ride", (data) => {
     logEvent('RIDE_STARTED', { rideId: data.rideId, driverId: data.driverId });
     
