@@ -431,7 +431,9 @@ io.on("connection", (socket) => {
       status: RIDE_STATES.SEARCHING,
       createdAt: Date.now(),
       acceptedBy: null,
-      driverId: null
+      driverId: null,
+      distance: data.distance || null, // Accept from client if provided
+      duration: data.duration || null  // Accept from client if provided
     };
     
     activeRides.set(rideId, rideData);
@@ -853,7 +855,10 @@ io.on("connection", (socket) => {
           rideId: data.rideId,
           message: "Ride completed successfully",
           status: RIDE_STATES.COMPLETED,
-          timestamp: Date.now()
+          timestamp: Date.now(),
+          fare: ride.price || null,        // Use original fare calculation from ride creation
+          distance: ride.distance || null, // Use original distance if set
+          duration: ride.duration || null  // Use original duration if set
         });
         
         // Notify driver
@@ -1026,7 +1031,10 @@ app.post('/debug/cleanup-stuck-rides', (req, res) => {
         rideId: rideId,
         message: "Ride auto-completed (debug cleanup)",
         status: RIDE_STATES.COMPLETED,
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        fare: ride.price || null,        // Use original fare calculation from ride creation
+        distance: ride.distance || null, // Use original distance if set
+        duration: ride.duration || null  // Use original duration if set
       });
       
       // Notify driver if exists
