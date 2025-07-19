@@ -378,61 +378,68 @@ app.post('/debug/cleanup-user/:userId', (req, res) => {
   }
 });
 
-const io = new Server({
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    credentials: true,
-    allowedHeaders: ["Content-Type", "Authorization", "Access-Control-Allow-Origin", "X-Requested-With", "Accept", "Origin", "User-Agent"]
-  },
-  allowEIO3: true,
-  allowEIO4: true,
-  transports: ["websocket", "polling"], // WebSocket first for React Native
-  path: "/socket.io/",
-  serveClient: false,
-  pingTimeout: 60000,
-  pingInterval: 25000,
-  connectTimeout: 45000,
-  maxHttpBufferSize: 1e8,
-  allowUpgrades: true,
-  perMessageDeflate: false,
-  httpCompression: true,
-  // Simplified request validation for React Native
-  allowRequest: (req, callback) => {
-    // Allow all Socket.IO requests for React Native
-    callback(null, true);
-  }
-});
+let io;
+try {
+  io = new Server({
+    cors: {
+      origin: "*",
+      methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+      credentials: true,
+      allowedHeaders: ["Content-Type", "Authorization", "Access-Control-Allow-Origin", "X-Requested-With", "Accept", "Origin", "User-Agent"]
+    },
+    allowEIO3: true,
+    allowEIO4: true,
+    transports: ["websocket", "polling"], // WebSocket first for React Native
+    path: "/socket.io/",
+    serveClient: false,
+    pingTimeout: 60000,
+    pingInterval: 25000,
+    connectTimeout: 45000,
+    maxHttpBufferSize: 1e8,
+    allowUpgrades: true,
+    perMessageDeflate: false,
+    httpCompression: true
+  });
+  logEvent('SOCKET_IO_CREATED', { success: true });
+} catch (error) {
+  logEvent('SOCKET_IO_CREATION_ERROR', { error: error.message });
+  // Create a minimal server without Socket.IO if it fails
+  io = null;
+}
 
 logEvent('SERVER_START', { port: PORT });
 
 // Add connection error handling
-io.engine.on("connection_error", (err) => {
-  logEvent('CONNECTION_ERROR', {
-    type: err.type,
-    message: err.message,
-    context: err.context,
-    req: {
-      headers: err.req?.headers,
-      url: err.req?.url,
-      method: err.req?.method,
-      userAgent: err.req?.headers['user-agent']
+if (io && io.engine) {
+  io.engine.on("connection_error", (err) => {
+    logEvent('CONNECTION_ERROR', {
+      type: err.type,
+      message: err.message,
+      context: err.context,
+      req: {
+        headers: err.req?.headers,
+        url: err.req?.url,
+        method: err.req?.method,
+        userAgent: err.req?.headers['user-agent']
+      }
+    });
+    
+    // Special handling for React Native XHR errors
+    if (err.message.includes('xhr poll error')) {
+      logEvent('REACT_NATIVE_XHR_ERROR', {
+        message: 'React Native XHR polling error detected',
+        suggestion: 'Client should use WebSocket transport'
+      });
     }
   });
-  
-  // Special handling for React Native XHR errors
-  if (err.message.includes('xhr poll error')) {
-    logEvent('REACT_NATIVE_XHR_ERROR', {
-      message: 'React Native XHR polling error detected',
-      suggestion: 'Client should use WebSocket transport'
-    });
-  }
-});
+}
 
-io.on("connection", (socket) => {
-  const { type, id } = socket.handshake.query;
-  const userAgent = socket.handshake.headers['user-agent'] || 'Unknown';
-  const origin = socket.handshake.headers.origin || 'Unknown';
+if (io) {
+  io.on("connection", (socket) => {
+  try {
+    const { type, id } = socket.handshake.query;
+    const userAgent = socket.handshake.headers['user-agent'] || 'Unknown';
+    const origin = socket.handshake.headers.origin || 'Unknown';
   
   logEvent('NEW_CONNECTION', { 
     socketId: socket.id, 
@@ -1143,7 +1150,15 @@ io.on("connection", (socket) => {
       logEvent('USER_DISCONNECTED', { userId: id, totalUsers: connectedUsers.size });
     }
   });
-});
+  } catch (error) {
+    logEvent('CONNECTION_HANDLER_ERROR', { 
+      socketId: socket.id, 
+      error: error.message, 
+      stack: error.stack 
+    });
+  }
+  });
+}
 
 // ========================================
 // DEBUG ENDPOINTS
@@ -1409,7 +1424,18 @@ const handleRideCancellation = (rideId, cancelledBy, reason = '') => {
 
 // Create HTTP server and attach Socket.IO
 const server = require('http').createServer(app);
-io.attach(server);
+
+// Attach Socket.IO to server with error handling
+if (io) {
+  try {
+    io.attach(server);
+    logEvent('SOCKET_IO_ATTACHED', { success: true });
+  } catch (error) {
+    logEvent('SOCKET_IO_ATTACH_ERROR', { error: error.message });
+  }
+} else {
+  logEvent('SOCKET_IO_NOT_AVAILABLE', { message: 'Socket.IO server not created, running HTTP-only mode' });
+}
 
 // Start the server
 server.listen(PORT, '0.0.0.0', () => {
