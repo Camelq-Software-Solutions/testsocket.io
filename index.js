@@ -4,8 +4,24 @@ const express = require("express");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Enhanced CORS middleware for React Native
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, Access-Control-Allow-Origin');
+  res.header('Access-Control-Allow-Credentials', true);
+  
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(200);
+  } else {
+    next();
+  }
+});
+
 // Basic middleware
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -29,7 +45,54 @@ app.get('/socket-info', (req, res) => {
     cors: {
       origin: '*',
       methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']
+    },
+    serverTime: new Date().toISOString(),
+    uptime: process.uptime()
+  });
+});
+
+// React Native connection test endpoint
+app.get('/test-connection', (req, res) => {
+  res.json({
+    status: 'ok',
+    message: 'Server is reachable from React Native',
+    timestamp: new Date().toISOString(),
+    headers: req.headers,
+    userAgent: req.headers['user-agent']
+  });
+});
+
+// Socket.IO connection test endpoint
+app.get('/socket-test', (req, res) => {
+  res.json({
+    status: 'ok',
+    message: 'Socket.IO server is running',
+    socketPath: '/socket.io/',
+    transports: ['websocket', 'polling'],
+    serverTime: new Date().toISOString(),
+    activeConnections: {
+      users: connectedUsers.size,
+      drivers: connectedDrivers.size,
+      total: connectedUsers.size + connectedDrivers.size
     }
+  });
+});
+
+// React Native specific test endpoint
+app.get('/react-native-test', (req, res) => {
+  res.json({
+    status: 'ok',
+    message: 'React Native Socket.IO test endpoint',
+    recommendedConfig: {
+      transports: ['websocket'],
+      upgrade: false,
+      rememberUpgrade: false,
+      extraHeaders: {
+        'User-Agent': 'ReactNative'
+      }
+    },
+    serverTime: new Date().toISOString(),
+    userAgent: req.headers['user-agent'] || 'Unknown'
   });
 });
 
@@ -320,27 +383,66 @@ const io = new Server({
     origin: "*",
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     credentials: true,
-    allowedHeaders: ["Content-Type", "Authorization", "Access-Control-Allow-Origin", "X-Requested-With"]
+    allowedHeaders: ["Content-Type", "Authorization", "Access-Control-Allow-Origin", "X-Requested-With", "Accept", "Origin", "User-Agent"]
   },
   allowEIO3: true,
-  transports: ["polling", "websocket"],
+  allowEIO4: true,
+  transports: ["websocket", "polling"], // WebSocket first for React Native
   path: "/socket.io/",
   serveClient: false,
   pingTimeout: 60000,
   pingInterval: 25000,
   connectTimeout: 45000,
   maxHttpBufferSize: 1e8,
+  allowUpgrades: true,
+  perMessageDeflate: false,
+  httpCompression: true,
+  // Simplified request validation for React Native
   allowRequest: (req, callback) => {
-    // Allow all requests for now
+    // Allow all Socket.IO requests for React Native
     callback(null, true);
   }
 });
 
 logEvent('SERVER_START', { port: PORT });
 
+// Add connection error handling
+io.engine.on("connection_error", (err) => {
+  logEvent('CONNECTION_ERROR', {
+    type: err.type,
+    message: err.message,
+    context: err.context,
+    req: {
+      headers: err.req?.headers,
+      url: err.req?.url,
+      method: err.req?.method,
+      userAgent: err.req?.headers['user-agent']
+    }
+  });
+  
+  // Special handling for React Native XHR errors
+  if (err.message.includes('xhr poll error')) {
+    logEvent('REACT_NATIVE_XHR_ERROR', {
+      message: 'React Native XHR polling error detected',
+      suggestion: 'Client should use WebSocket transport'
+    });
+  }
+});
+
 io.on("connection", (socket) => {
   const { type, id } = socket.handshake.query;
-  logEvent('NEW_CONNECTION', { socketId: socket.id, type, id });
+  const userAgent = socket.handshake.headers['user-agent'] || 'Unknown';
+  const origin = socket.handshake.headers.origin || 'Unknown';
+  
+  logEvent('NEW_CONNECTION', { 
+    socketId: socket.id, 
+    type, 
+    id, 
+    userAgent: userAgent.substring(0, 100), // Truncate for logging
+    origin,
+    transport: socket.conn.transport.name,
+    remoteAddress: socket.handshake.address
+  });
 
   // Test event handler
   socket.on("test_event", (data) => {
