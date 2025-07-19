@@ -12,7 +12,7 @@ RUN npm ci --only=production
 COPY . .
 
 # Expose port
-EXPOSE 9092
+EXPOSE 3000
 
 # Run app
 CMD [ "node", "index.js" ]

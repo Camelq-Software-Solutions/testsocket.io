@@ -7,6 +7,32 @@ const PORT = process.env.PORT || 3000;
 // Basic middleware
 app.use(express.json());
 
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    connections: {
+      users: connectedUsers.size,
+      drivers: connectedDrivers.size,
+      activeRides: activeRides.size
+    }
+  });
+});
+
+// Socket.IO endpoint info
+app.get('/socket-info', (req, res) => {
+  res.json({
+    socketPath: '/socket.io/',
+    transports: ['polling', 'websocket'],
+    cors: {
+      origin: '*',
+      methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']
+    }
+  });
+});
+
 // In-memory storage for active rides (in production, use Redis or database)
 const activeRides = new Map();
 const connectedDrivers = new Map();
@@ -294,10 +320,10 @@ const io = new Server({
     origin: "*",
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     credentials: true,
-    allowedHeaders: ["Content-Type", "Authorization", "Access-Control-Allow-Origin"]
+    allowedHeaders: ["Content-Type", "Authorization", "Access-Control-Allow-Origin", "X-Requested-With"]
   },
   allowEIO3: true,
-  transports: ["websocket", "polling"],
+  transports: ["polling", "websocket"],
   path: "/socket.io/",
   serveClient: false,
   pingTimeout: 60000,
@@ -315,6 +341,16 @@ logEvent('SERVER_START', { port: PORT });
 io.on("connection", (socket) => {
   const { type, id } = socket.handshake.query;
   logEvent('NEW_CONNECTION', { socketId: socket.id, type, id });
+
+  // Test event handler
+  socket.on("test_event", (data) => {
+    logEvent('TEST_EVENT', { socketId: socket.id, data });
+    socket.emit("test_response", {
+      message: "Hello from server!",
+      received: data,
+      timestamp: Date.now()
+    });
+  });
 
   // Store connection info
   if (type === "driver") {
@@ -1276,4 +1312,24 @@ io.attach(server);
 // Start the server
 server.listen(PORT, '0.0.0.0', () => {
   logEvent('SERVER_LISTENING', { port: PORT });
+});
+
+// Error handling for server
+server.on('error', (error) => {
+  logEvent('SERVER_ERROR', { error: error.message, code: error.code });
+});
+
+// Handle process termination
+process.on('SIGTERM', () => {
+  logEvent('SERVER_SHUTDOWN', { reason: 'SIGTERM' });
+  server.close(() => {
+    process.exit(0);
+  });
+});
+
+process.on('SIGINT', () => {
+  logEvent('SERVER_SHUTDOWN', { reason: 'SIGINT' });
+  server.close(() => {
+    process.exit(0);
+  });
 });
