@@ -4,12 +4,14 @@ const express = require("express");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Enhanced CORS middleware for React Native
+// Enhanced CORS middleware for React Native and APK clients
 app.use((req, res, next) => {
+  // Allow all origins for APK compatibility
   res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, Access-Control-Allow-Origin');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, Access-Control-Allow-Origin, User-Agent, X-Platform, X-Environment, X-App-Version');
   res.header('Access-Control-Allow-Credentials', true);
+  res.header('Access-Control-Max-Age', '86400'); // 24 hours
   
   // Handle preflight requests
   if (req.method === 'OPTIONS') {
@@ -20,75 +22,175 @@ app.use((req, res, next) => {
 });
 
 // Basic middleware
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Health check endpoint
+// Enhanced health check endpoint with APK-specific info
 app.get('/health', (req, res) => {
+  const userAgent = req.headers['user-agent'] || 'Unknown';
+  const isAPK = userAgent.includes('ReactNative-APK') || userAgent.includes('android-apk');
+  
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
+    memory: process.memoryUsage(),
     connections: {
       users: connectedUsers.size,
       drivers: connectedDrivers.size,
       activeRides: activeRides.size
+    },
+    clientInfo: {
+      userAgent: userAgent.substring(0, 100), // Truncate for logging
+      isAPK: isAPK,
+      platform: req.headers['x-platform'] || 'unknown',
+      environment: req.headers['x-environment'] || 'unknown',
+      appVersion: req.headers['x-app-version'] || 'unknown'
+    },
+    serverConfig: {
+      socketPath: '/socket.io/',
+      transports: ['websocket', 'polling'],
+      pingTimeout: 60000,
+      pingInterval: 25000,
+      connectTimeout: 45000
     }
   });
 });
 
-// Socket.IO endpoint info
+// Socket.IO endpoint info with APK recommendations
 app.get('/socket-info', (req, res) => {
+  const userAgent = req.headers['user-agent'] || 'Unknown';
+  const isAPK = userAgent.includes('ReactNative-APK') || userAgent.includes('android-apk');
+  
   res.json({
     socketPath: '/socket.io/',
-    transports: ['polling', 'websocket'],
+    transports: ['websocket', 'polling'],
+    recommendedTransports: isAPK ? ['websocket'] : ['websocket', 'polling'],
     cors: {
       origin: '*',
-      methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']
+      methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+      credentials: true,
+      allowedHeaders: ['Content-Type', 'Authorization', 'Access-Control-Allow-Origin', 'X-Requested-With', 'Accept', 'Origin', 'User-Agent', 'X-Platform', 'X-Environment', 'X-App-Version']
     },
     serverTime: new Date().toISOString(),
-    uptime: process.uptime()
+    uptime: process.uptime(),
+    apkRecommendations: isAPK ? {
+      useWebSocketOnly: true,
+      disableUpgrade: true,
+      longerTimeouts: true,
+      aggressiveReconnection: true
+    } : null
   });
 });
 
 // React Native connection test endpoint
 app.get('/test-connection', (req, res) => {
+  const userAgent = req.headers['user-agent'] || 'Unknown';
+  const isAPK = userAgent.includes('ReactNative-APK') || userAgent.includes('android-apk');
+  
   res.json({
     status: 'ok',
     message: 'Server is reachable from React Native',
     timestamp: new Date().toISOString(),
-    headers: req.headers,
-    userAgent: req.headers['user-agent']
+    headers: {
+      'user-agent': userAgent,
+      'x-platform': req.headers['x-platform'],
+      'x-environment': req.headers['x-environment'],
+      'x-app-version': req.headers['x-app-version']
+    },
+    clientType: isAPK ? 'APK' : 'Expo/Development',
+    recommendations: isAPK ? {
+      transport: 'websocket',
+      upgrade: false,
+      rememberUpgrade: false,
+      timeout: 30000,
+      reconnectionAttempts: 25
+    } : {
+      transport: 'websocket',
+      upgrade: true,
+      timeout: 20000,
+      reconnectionAttempts: 15
+    }
   });
 });
 
 // Socket.IO connection test endpoint
 app.get('/socket-test', (req, res) => {
+  const userAgent = req.headers['user-agent'] || 'Unknown';
+  const isAPK = userAgent.includes('ReactNative-APK') || userAgent.includes('android-apk');
+  
   res.json({
     status: 'ok',
     message: 'Socket.IO server is running',
     socketPath: '/socket.io/',
     transports: ['websocket', 'polling'],
+    recommendedTransports: isAPK ? ['websocket'] : ['websocket', 'polling'],
     serverTime: new Date().toISOString(),
     activeConnections: {
       users: connectedUsers.size,
       drivers: connectedDrivers.size,
       total: connectedUsers.size + connectedDrivers.size
-    }
+    },
+    clientType: isAPK ? 'APK' : 'Expo/Development'
   });
 });
 
 // React Native specific test endpoint
 app.get('/react-native-test', (req, res) => {
+  const userAgent = req.headers['user-agent'] || 'Unknown';
+  const isAPK = userAgent.includes('ReactNative-APK') || userAgent.includes('android-apk');
+  
   res.json({
     status: 'ok',
     message: 'React Native Socket.IO test endpoint',
+    recommendedConfig: isAPK ? {
+      transports: ['websocket'],
+      upgrade: false,
+      rememberUpgrade: false,
+      timeout: 30000,
+      reconnectionAttempts: 25,
+      reconnectionDelay: 1500,
+      reconnectionDelayMax: 8000,
+      extraHeaders: {
+        'User-Agent': 'ReactNative-APK',
+        'X-Platform': 'Android',
+        'X-Environment': 'production'
+      }
+    } : {
+      transports: ['websocket'],
+      upgrade: true,
+      timeout: 20000,
+      reconnectionAttempts: 15,
+      extraHeaders: {
+        'User-Agent': 'ReactNative'
+      }
+    },
+    serverTime: new Date().toISOString(),
+    userAgent: userAgent,
+    clientType: isAPK ? 'APK' : 'Expo/Development'
+  });
+});
+
+// APK-specific test endpoint
+app.get('/apk-test', (req, res) => {
+  res.json({
+    status: 'ok',
+    message: 'APK-specific test endpoint',
     recommendedConfig: {
       transports: ['websocket'],
       upgrade: false,
       rememberUpgrade: false,
+      timeout: 30000,
+      reconnectionAttempts: 25,
+      reconnectionDelay: 1500,
+      reconnectionDelayMax: 8000,
+      pingTimeout: 60000,
+      pingInterval: 25000,
       extraHeaders: {
-        'User-Agent': 'ReactNative'
+        'User-Agent': 'ReactNative-APK',
+        'X-Platform': 'Android',
+        'X-Environment': 'production',
+        'X-App-Version': '1.0.0'
       }
     },
     serverTime: new Date().toISOString(),
@@ -383,9 +485,9 @@ try {
   io = new Server({
     cors: {
       origin: "*",
-      methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+      methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
       credentials: true,
-      allowedHeaders: ["Content-Type", "Authorization", "Access-Control-Allow-Origin", "X-Requested-With", "Accept", "Origin", "User-Agent"]
+      allowedHeaders: ["Content-Type", "Authorization", "Access-Control-Allow-Origin", "X-Requested-With", "Accept", "Origin", "User-Agent", "X-Platform", "X-Environment", "X-App-Version"]
     },
     allowEIO3: true,
     allowEIO4: true,
@@ -398,7 +500,20 @@ try {
     maxHttpBufferSize: 1e8,
     allowUpgrades: true,
     perMessageDeflate: false,
-    httpCompression: true
+    httpCompression: true,
+    // APK-specific optimizations
+    upgrade: true,
+    rememberUpgrade: true,
+    // Enhanced error handling
+    handlePreflightRequest: (req, res) => {
+      res.writeHead(200, {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, PATCH",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, Access-Control-Allow-Origin, X-Requested-With, Accept, Origin, User-Agent, X-Platform, X-Environment, X-App-Version",
+        "Access-Control-Allow-Credentials": true
+      });
+      res.end();
+    }
   });
   logEvent('SOCKET_IO_CREATED', { success: true });
 } catch (error) {
@@ -412,15 +527,23 @@ logEvent('SERVER_START', { port: PORT });
 // Add connection error handling
 if (io && io.engine) {
   io.engine.on("connection_error", (err) => {
+    const userAgent = err.req?.headers['user-agent'] || 'Unknown';
+    const isAPK = userAgent.includes('ReactNative-APK') || userAgent.includes('android-apk');
+    
     logEvent('CONNECTION_ERROR', {
       type: err.type,
       message: err.message,
       context: err.context,
+      clientType: isAPK ? 'APK' : 'Expo/Development',
       req: {
-        headers: err.req?.headers,
+        headers: {
+          'user-agent': userAgent,
+          'x-platform': err.req?.headers['x-platform'],
+          'x-environment': err.req?.headers['x-environment'],
+          'x-app-version': err.req?.headers['x-app-version']
+        },
         url: err.req?.url,
-        method: err.req?.method,
-        userAgent: err.req?.headers['user-agent']
+        method: err.req?.method
       }
     });
     
@@ -428,7 +551,22 @@ if (io && io.engine) {
     if (err.message.includes('xhr poll error')) {
       logEvent('REACT_NATIVE_XHR_ERROR', {
         message: 'React Native XHR polling error detected',
-        suggestion: 'Client should use WebSocket transport'
+        clientType: isAPK ? 'APK' : 'Expo/Development',
+        suggestion: isAPK ? 'APK client should use WebSocket transport only' : 'Client should use WebSocket transport'
+      });
+    }
+    
+    // Special handling for APK-specific errors
+    if (isAPK) {
+      logEvent('APK_CONNECTION_ERROR', {
+        message: 'APK-specific connection error detected',
+        error: err.message,
+        recommendations: [
+          'Use WebSocket transport only',
+          'Disable transport upgrade',
+          'Increase connection timeout',
+          'Use aggressive reconnection'
+        ]
       });
     }
   });
@@ -437,19 +575,43 @@ if (io && io.engine) {
 if (io) {
   io.on("connection", (socket) => {
   try {
-    const { type, id } = socket.handshake.query;
+    const { type, id, platform, version } = socket.handshake.query;
     const userAgent = socket.handshake.headers['user-agent'] || 'Unknown';
     const origin = socket.handshake.headers.origin || 'Unknown';
+    const isAPK = userAgent.includes('ReactNative-APK') || userAgent.includes('android-apk') || platform === 'android-apk';
   
   logEvent('NEW_CONNECTION', { 
     socketId: socket.id, 
     type, 
     id, 
+    platform,
+    version,
     userAgent: userAgent.substring(0, 100), // Truncate for logging
     origin,
     transport: socket.conn.transport.name,
-    remoteAddress: socket.handshake.address
+    remoteAddress: socket.handshake.address,
+    clientType: isAPK ? 'APK' : 'Expo/Development',
+    headers: {
+      'x-platform': socket.handshake.headers['x-platform'],
+      'x-environment': socket.handshake.headers['x-environment'],
+      'x-app-version': socket.handshake.headers['x-app-version']
+    }
   });
+  
+  // APK-specific connection handling
+  if (isAPK) {
+    logEvent('APK_CONNECTION', {
+      socketId: socket.id,
+      type,
+      id,
+      transport: socket.conn.transport.name,
+      recommendations: [
+        'Monitor connection stability',
+        'Use WebSocket transport only',
+        'Implement aggressive reconnection'
+      ]
+    });
+  }
 
   // Test event handler
   socket.on("test_event", (data) => {
@@ -459,6 +621,33 @@ if (io) {
       received: data,
       timestamp: Date.now()
     });
+  });
+
+  // Enhanced disconnection handling for APK clients
+  socket.on("disconnect", (reason) => {
+    const userAgent = socket.handshake.headers['user-agent'] || 'Unknown';
+    const isAPK = userAgent.includes('ReactNative-APK') || userAgent.includes('android-apk');
+    
+    logEvent('SOCKET_DISCONNECT', {
+      socketId: socket.id,
+      type,
+      id,
+      reason,
+      clientType: isAPK ? 'APK' : 'Expo/Development',
+      transport: socket.conn.transport.name
+    });
+    
+    if (isAPK) {
+      logEvent('APK_DISCONNECT', {
+        socketId: socket.id,
+        reason,
+        recommendations: [
+          'Check network connectivity',
+          'Verify server reachability',
+          'Monitor reconnection attempts'
+        ]
+      });
+    }
   });
 
   // Store connection info
@@ -1314,6 +1503,84 @@ app.get('/debug/state', (req, res) => {
   };
   
   res.json(state);
+});
+
+// APK-specific debug endpoint
+app.get('/debug/apk-connections', (req, res) => {
+  const apkConnections = [];
+  const expoConnections = [];
+  
+  // Analyze connected users
+  for (const [userId, user] of connectedUsers.entries()) {
+    const userSocket = io.sockets.sockets.get(user.socketId);
+    if (userSocket) {
+      const userAgent = userSocket.handshake.headers['user-agent'] || 'Unknown';
+      const isAPK = userAgent.includes('ReactNative-APK') || userAgent.includes('android-apk');
+      
+      const connectionInfo = {
+        userId,
+        socketId: user.socketId,
+        userAgent: userAgent.substring(0, 100),
+        transport: userSocket.conn.transport.name,
+        platform: userSocket.handshake.headers['x-platform'],
+        environment: userSocket.handshake.headers['x-environment'],
+        appVersion: userSocket.handshake.headers['x-app-version'],
+        lastSeen: user.lastSeen,
+        isAPK
+      };
+      
+      if (isAPK) {
+        apkConnections.push(connectionInfo);
+      } else {
+        expoConnections.push(connectionInfo);
+      }
+    }
+  }
+  
+  // Analyze connected drivers
+  for (const [driverId, driver] of connectedDrivers.entries()) {
+    const driverSocket = io.sockets.sockets.get(driver.socketId);
+    if (driverSocket) {
+      const userAgent = driverSocket.handshake.headers['user-agent'] || 'Unknown';
+      const isAPK = userAgent.includes('ReactNative-APK') || userAgent.includes('android-apk');
+      
+      const connectionInfo = {
+        driverId,
+        socketId: driver.socketId,
+        userAgent: userAgent.substring(0, 100),
+        transport: driverSocket.conn.transport.name,
+        platform: driverSocket.handshake.headers['x-platform'],
+        environment: driverSocket.handshake.headers['x-environment'],
+        appVersion: driverSocket.handshake.headers['x-app-version'],
+        lastSeen: driver.lastSeen,
+        status: driver.status,
+        isAPK
+      };
+      
+      if (isAPK) {
+        apkConnections.push(connectionInfo);
+      } else {
+        expoConnections.push(connectionInfo);
+      }
+    }
+  }
+  
+  res.json({
+    apkConnections: {
+      count: apkConnections.length,
+      connections: apkConnections
+    },
+    expoConnections: {
+      count: expoConnections.length,
+      connections: expoConnections
+    },
+    summary: {
+      totalConnections: apkConnections.length + expoConnections.length,
+      apkPercentage: ((apkConnections.length / (apkConnections.length + expoConnections.length)) * 100).toFixed(2) + '%',
+      expoPercentage: ((expoConnections.length / (apkConnections.length + expoConnections.length)) * 100).toFixed(2) + '%'
+    },
+    serverTime: new Date().toISOString()
+  });
 });
 
 // Cancellation fee rules
