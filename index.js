@@ -752,7 +752,17 @@ if (io) {
       return;
     }
     
-    const rideId = `ride_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    // Use backend ride ID if provided, otherwise generate Socket.IO ride ID
+    let rideId;
+    if (data.rideId && !data.rideId.startsWith('ride_')) {
+      // Customer app provided the backend ride ID
+      rideId = data.rideId;
+      logEvent('USING_BACKEND_RIDE_ID', { rideId: data.rideId });
+    } else {
+      // Generate Socket.IO ride ID (fallback for older clients)
+      rideId = `ride_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      logEvent('GENERATED_SOCKET_RIDE_ID', { rideId });
+    }
     
     // Create ride entry with SEARCHING state
     const rideData = {
@@ -799,6 +809,13 @@ if (io) {
       userId: data.userId,
       timestamp: Date.now()
     };
+    
+    // If we're using a backend ride ID, include it in the request for drivers
+    if (data.rideId && !data.rideId.startsWith('ride_')) {
+      rideRequest.backendRideId = data.rideId;
+      rideRequest.originalRideId = data.rideId;
+      logEvent('ADDED_BACKEND_RIDE_ID_TO_REQUEST', { backendRideId: data.rideId });
+    }
     
     if (currentDriverIds.length > 0) {
       io.to("drivers").emit("new_ride_request", rideRequest);
