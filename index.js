@@ -209,6 +209,10 @@ const rideRequestRecipients = new Map();
 const userActiveRides = new Map();
 const rideAcceptanceAttempts = new Map();
 
+// Chat message storage
+const chatMessages = new Map(); // rideId -> messages array
+const chatParticipants = new Map(); // rideId -> { userId, driverId }
+
 // Enhanced logging with timestamps
 const logEvent = (event, data = {}) => {
   console.log(`[${new Date().toISOString()}] ${event}:`, data);
@@ -1332,6 +1336,231 @@ if (io) {
       longitude: data.longitude,
       timestamp: Date.now()
     });
+  });
+
+  // ========================================
+  // CHAT FUNCTIONALITY
+  // ========================================
+
+  // Event: Send chat message
+  socket.on("send_chat_message", (data) => {
+    const { rideId, senderId, senderType, message, rideId: messageRideId } = data;
+    
+    logEvent('SEND_CHAT_MESSAGE', { 
+      rideId, 
+      senderId, 
+      senderType, 
+      messageLength: message.length 
+    });
+
+    // Validate ride exists and sender is participant
+    const ride = activeRides.get(rideId);
+    if (!ride) {
+      socket.emit("chat_message_error", { 
+        message: "Ride not found" 
+      });
+      return;
+    }
+
+    // Check if sender is part of this ride
+    const isUser = senderType === 'user' && ride.userId === senderId;
+    const isDriver = senderType === 'driver' && ride.driverId === senderId;
+    
+    if (!isUser && !isDriver) {
+      socket.emit("chat_message_error", { 
+        message: "You are not authorized to send messages for this ride" 
+      });
+      return;
+    }
+
+    // Create message object
+    const chatMessage = {
+      id: `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      rideId: rideId,
+      senderId: senderId,
+      senderType: senderType,
+      message: message.trim(),
+      timestamp: Date.now(),
+      isRead: false
+    };
+
+    // Store message
+    if (!chatMessages.has(rideId)) {
+      chatMessages.set(rideId, []);
+    }
+    chatMessages.get(rideId).push(chatMessage);
+
+    // Emit to both participants
+    const messageData = {
+      ...chatMessage,
+      timestamp: new Date(chatMessage.timestamp).toLocaleTimeString([], { 
+        hour: '2-digit', 
+        minute: '2-digit' 
+      })
+    };
+
+    // Send to user
+    io.to(`user:${ride.userId}`).emit("receive_chat_message", messageData);
+    
+    // Send to driver if ride is accepted
+    if (ride.driverId) {
+      io.to(`driver:${ride.driverId}`).emit("receive_chat_message", messageData);
+    }
+
+    // Send confirmation to sender
+    socket.emit("chat_message_sent", {
+      messageId: chatMessage.id,
+      timestamp: messageData.timestamp
+    });
+
+    logEvent('CHAT_MESSAGE_SENT', { 
+      rideId, 
+      messageId: chatMessage.id, 
+      senderType 
+    });
+  });
+
+  // Event: Mark messages as read
+  socket.on("mark_messages_read", (data) => {
+    const { rideId, readerId, readerType } = data;
+    
+    logEvent('MARK_MESSAGES_READ', { rideId, readerId, readerType });
+
+    const ride = activeRides.get(rideId);
+    if (!ride) {
+      return;
+    }
+
+    // Validate reader is participant
+    const isUser = readerType === 'user' && ride.userId === readerId;
+    const isDriver = readerType === 'driver' && ride.driverId === readerId;
+    
+    if (!isUser && !isDriver) {
+      return;
+    }
+
+    // Mark messages as read
+    const messages = chatMessages.get(rideId);
+    if (messages) {
+      messages.forEach(msg => {
+        if (msg.senderType !== readerType && !msg.isRead) {
+          msg.isRead = true;
+        }
+      });
+    }
+
+    // Notify other participant
+    const otherParticipantId = readerType === 'user' ? ride.driverId : ride.userId;
+    const otherParticipantType = readerType === 'user' ? 'driver' : 'user';
+    
+    if (otherParticipantId) {
+      io.to(`${otherParticipantType}:${otherParticipantId}`).emit("messages_read", {
+        rideId: rideId,
+        readBy: readerId,
+        readByType: readerType,
+        timestamp: Date.now()
+      });
+    }
+  });
+
+  // Event: Get chat history
+  socket.on("get_chat_history", (data) => {
+    const { rideId, requesterId, requesterType } = data;
+    
+    logEvent('GET_CHAT_HISTORY', { rideId, requesterId, requesterType });
+
+    const ride = activeRides.get(rideId);
+    if (!ride) {
+      socket.emit("chat_history_error", { 
+        message: "Ride not found" 
+      });
+      return;
+    }
+
+    // Validate requester is participant
+    const isUser = requesterType === 'user' && ride.userId === requesterId;
+    const isDriver = requesterType === 'driver' && ride.driverId === requesterId;
+    
+    if (!isUser && !isDriver) {
+      socket.emit("chat_history_error", { 
+        message: "You are not authorized to view messages for this ride" 
+      });
+      return;
+    }
+
+    // Get chat history
+    const messages = chatMessages.get(rideId) || [];
+    const formattedMessages = messages.map(msg => ({
+      ...msg,
+      timestamp: new Date(msg.timestamp).toLocaleTimeString([], { 
+        hour: '2-digit', 
+        minute: '2-digit' 
+      })
+    }));
+
+    socket.emit("chat_history", {
+      rideId: rideId,
+      messages: formattedMessages,
+      totalMessages: formattedMessages.length
+    });
+
+    logEvent('CHAT_HISTORY_SENT', { 
+      rideId, 
+      messageCount: formattedMessages.length 
+    });
+  });
+
+  // Event: Typing indicator
+  socket.on("typing_start", (data) => {
+    const { rideId, senderId, senderType } = data;
+    
+    const ride = activeRides.get(rideId);
+    if (!ride) return;
+
+    // Validate sender is participant
+    const isUser = senderType === 'user' && ride.userId === senderId;
+    const isDriver = senderType === 'driver' && ride.driverId === senderId;
+    
+    if (!isUser && !isDriver) return;
+
+    // Emit typing indicator to other participant
+    const otherParticipantId = senderType === 'user' ? ride.driverId : ride.userId;
+    const otherParticipantType = senderType === 'user' ? 'driver' : 'user';
+    
+    if (otherParticipantId) {
+      io.to(`${otherParticipantType}:${otherParticipantId}`).emit("typing_indicator", {
+        rideId: rideId,
+        isTyping: true,
+        senderId: senderId,
+        senderType: senderType
+      });
+    }
+  });
+
+  socket.on("typing_stop", (data) => {
+    const { rideId, senderId, senderType } = data;
+    
+    const ride = activeRides.get(rideId);
+    if (!ride) return;
+
+    // Validate sender is participant
+    const isUser = senderType === 'user' && ride.userId === senderId;
+    const isDriver = senderType === 'driver' && ride.driverId === senderId;
+    
+    if (!isUser && !isDriver) return;
+
+    // Emit typing stop to other participant
+    const otherParticipantId = senderType === 'user' ? ride.driverId : ride.userId;
+    const otherParticipantType = senderType === 'user' ? 'driver' : 'user';
+    
+    if (otherParticipantId) {
+      io.to(`${otherParticipantType}:${otherParticipantId}`).emit("typing_indicator", {
+        rideId: rideId,
+        isTyping: false,
+        senderId: senderId,
+        senderType: senderType
+      });
+    }
   });
 
   // ========================================
