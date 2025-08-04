@@ -324,6 +324,29 @@ const updateRideState = (rideId, newState, additionalData = {}) => {
     driverId: ride.driverId 
   });
   
+  // Emit state change events to users and drivers
+  if (ride.userId) {
+    io.to(`user:${ride.userId}`).emit("RIDE_STATE_CHANGED", {
+      rideId,
+      from: oldState,
+      to: newState,
+      userId: ride.userId,
+      driverId: ride.driverId,
+      timestamp: Date.now()
+    });
+  }
+  
+  if (ride.driverId) {
+    io.to(`driver:${ride.driverId}`).emit("RIDE_STATE_CHANGED", {
+      rideId,
+      from: oldState,
+      to: newState,
+      userId: ride.userId,
+      driverId: ride.driverId,
+      timestamp: Date.now()
+    });
+  }
+  
   return { success: true, ride };
 };
 
@@ -1090,6 +1113,43 @@ if (io) {
       rideId: data.rideId,
       message: "OTP sent successfully, waiting for customer verification"
     });
+    
+    // Notify customer that driver has sent OTP (for new flow where customer doesn't enter MPIN)
+    io.to(`user:${ride.userId}`).emit("DRIVER_SENT_OTP", {
+      rideId: data.rideId,
+      driverId: data.driverId,
+      otp: data.otp,
+      message: "Driver has entered OTP, ride can proceed"
+    });
+    
+    logEvent('CUSTOMER_NOTIFIED_OTP', { rideId: data.rideId, userId: ride.userId });
+    
+    // Auto-start the ride since customer doesn't need to enter MPIN anymore
+    setTimeout(() => {
+      const updateResult = updateRideState(data.rideId, RIDE_STATES.STARTED);
+      if (updateResult.success) {
+        logEvent('RIDE_AUTO_STARTED_AFTER_OTP', { rideId: data.rideId, driverId: data.driverId });
+        
+        // Notify customer that ride has started
+        io.to(`user:${ride.userId}`).emit("ride_started", {
+          rideId: data.rideId,
+          driverId: data.driverId,
+          message: "Ride has started automatically after OTP verification",
+          status: RIDE_STATES.STARTED
+        });
+        
+        // Notify driver that ride has started
+        io.to(`driver:${ride.driverId}`).emit("ride_started", {
+          rideId: data.rideId,
+          message: "Ride has started automatically after OTP verification",
+          status: RIDE_STATES.STARTED
+        });
+        
+        // Clean up OTP data
+        delete ride.driverOtp;
+        delete ride.otpTimestamp;
+      }
+    }, 2000); // 2 second delay to allow customer to see the OTP notification
   });
 
   // Event: Customer verifies MPIN
