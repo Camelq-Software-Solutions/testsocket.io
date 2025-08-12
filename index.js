@@ -539,6 +539,50 @@ app.post('/debug/cleanup-ride/:rideId', (req, res) => {
   }
 });
 
+// Debug endpoint to force cancel a ride
+app.post('/debug/force-cancel-ride/:rideId', (req, res) => {
+  const { rideId } = req.params;
+  const { cancelledBy = 'SYSTEM', reason = 'Force cancelled via debug endpoint' } = req.body;
+  
+  console.log(`🔧 Force cancelling ride ${rideId} via debug endpoint`);
+  
+  const activeRide = activeRides.get(rideId);
+  if (!activeRide) {
+    res.json({ 
+      success: false, 
+      message: `Ride ${rideId} not found in active rides` 
+    });
+    return;
+  }
+  
+  try {
+    // Force cancel the ride
+    const result = handleRideCancellation(rideId, cancelledBy, reason);
+    
+    if (result.success) {
+      res.json({ 
+        success: true, 
+        message: `Force cancelled ride ${rideId}`,
+        cancellationFee: result.cancellationFee,
+        action: 'force_cancelled_ride'
+      });
+    } else {
+      res.json({ 
+        success: false, 
+        message: `Failed to force cancel ride ${rideId}: ${result.error}`,
+        error: result.error
+      });
+    }
+  } catch (error) {
+    console.error(`❌ Error force cancelling ride ${rideId}:`, error);
+    res.json({ 
+      success: false, 
+      message: `Error force cancelling ride ${rideId}: ${error.message}`,
+      error: error.message
+    });
+  }
+});
+
 // Debug endpoint
 app.get('/debug/sockets', (req, res) => {
   const debugInfo = {
