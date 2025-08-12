@@ -1,5 +1,11 @@
 const { Server } = require("socket.io");
 const express = require("express");
+const { v4: uuidv4 } = require("uuid");
+
+// Generate UUID function
+const generateUUID = () => {
+  return uuidv4();
+};
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -898,16 +904,16 @@ if (io) {
       return;
     }
     
-    // Use backend ride ID if provided, otherwise generate Socket.IO ride ID
+    // Use backend ride ID if provided, otherwise generate proper UUID
     let rideId;
     if (data.rideId && !data.rideId.startsWith('ride_')) {
       // Customer app provided the backend ride ID
       rideId = data.rideId;
       logEvent('USING_BACKEND_RIDE_ID', { rideId: data.rideId });
     } else {
-      // Generate Socket.IO ride ID (fallback for older clients)
-      rideId = `ride_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      logEvent('GENERATED_SOCKET_RIDE_ID', { rideId });
+      // Generate proper UUID for backend compatibility
+      rideId = generateUUID();
+      logEvent('GENERATED_UUID_RIDE_ID', { rideId });
     }
     
     // Create ride entry with SEARCHING state

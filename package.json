@@ -11,13 +11,14 @@
   "license": "ISC",
   "dependencies": {
     "express": "^4.21.2",
-    "socket.io": "^4.8.1"
+    "socket.io": "^4.8.1",
+    "uuid": "^11.1.0"
   },
   "devDependencies": {
+    "@types/react": "~19.0.10",
     "nodemon": "^3.1.10",
     "socket.io-client": "^4.8.1",
-    "typescript": "~5.8.3",
-    "@types/react": "~19.0.10"
+    "typescript": "~5.8.3"
   },
   "description": ""
 }
