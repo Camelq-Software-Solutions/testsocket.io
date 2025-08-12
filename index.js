@@ -1460,6 +1460,7 @@ if (io) {
 
   // Event: Driver cancels a ride
   socket.on("driver_cancel_ride", (data) => {
+    console.log(`🚫 Driver cancellation request received:`, data);
     logEvent('DRIVER_CANCEL_RIDE_REQUEST', data);
     
     // Check if ride is locked
@@ -1475,10 +1476,17 @@ if (io) {
     rideLocks.set(data.rideId, Date.now());
     
     try {
+      // Log current ride status before attempting cancellation
+      const currentRide = activeRides.get(data.rideId);
+      if (currentRide) {
+        console.log(`🔍 Current ride status: ${currentRide.status} for ride: ${data.rideId}`);
+      }
+      
       // Use enhanced cancellation handler
       const result = handleRideCancellation(data.rideId, 'DRIVER', data.reason || '');
       
       if (result.success) {
+        console.log(`✅ Driver cancellation successful for ride: ${data.rideId}`);
         logEvent('DRIVER_CANCELLATION_COMPLETE', { 
           rideId: data.rideId, 
           cancelledBy: 'DRIVER',
@@ -1490,15 +1498,19 @@ if (io) {
           rideId: data.rideId
         });
       } else {
+        console.log(`❌ Driver cancellation failed for ride: ${data.rideId}, error: ${result.error}`);
         logEvent('DRIVER_CANCELLATION_FAILED', { rideId: data.rideId, error: result.error });
         
         // Send error with appropriate flags
-        socket.emit("driver_cancellation_error", { 
+        const errorResponse = { 
           message: result.error,
           rideId: data.rideId,
           alreadyCancelled: result.alreadyCancelled || false,
-          notFound: result.notFound || false
-        });
+          notFound: result.notFound || false,
+          currentStatus: result.currentStatus || null
+        };
+        console.log(`📤 Sending cancellation error response:`, errorResponse);
+        socket.emit("driver_cancellation_error", errorResponse);
       }
     } catch (error) {
       logEvent('DRIVER_CANCELLATION_EXCEPTION', { rideId: data.rideId, error: error.message });
@@ -2093,7 +2105,11 @@ const handleRideCancellation = (rideId, cancelledBy, reason = '') => {
   // Check if ride can be cancelled
   if (ride.status === RIDE_STATES.STARTED || ride.status === RIDE_STATES.COMPLETED) {
     console.log(`❌ Ride ${rideId} cannot be cancelled at status: ${ride.status}`);
-    return { success: false, error: 'Ride cannot be cancelled at this stage' };
+    return { 
+      success: false, 
+      error: `Ride cannot be cancelled at this stage. Current status: ${ride.status}`,
+      currentStatus: ride.status
+    };
   }
   
   // Calculate cancellation fee
