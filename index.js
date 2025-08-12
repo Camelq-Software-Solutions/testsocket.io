@@ -209,6 +209,9 @@ const rideRequestRecipients = new Map();
 const userActiveRides = new Map();
 const rideAcceptanceAttempts = new Map();
 
+// Store cancelled rides to prevent duplicate cancellation attempts
+const cancelledRides = new Map();
+
 // Chat message storage
 const chatMessages = new Map(); // rideId -> messages array
 const chatParticipants = new Map(); // rideId -> { userId, driverId }
@@ -278,6 +281,11 @@ const cleanupRide = (rideId, userId) => {
   if (userId) {
     userActiveRides.delete(userId);
   }
+  
+  // Clean up cancelled rides after some time to prevent memory leaks
+  setTimeout(() => {
+    cancelledRides.delete(rideId);
+  }, 300000); // 5 minutes
 };
 
 // Helper function to reset driver status
@@ -459,9 +467,76 @@ app.get('/health', (req, res) => {
     connections: {
       users: connectedUsers.size,
       drivers: connectedDrivers.size,
-      activeRides: activeRides.size
+      activeRides: activeRides.size,
+      cancelledRides: cancelledRides.size,
+      rideLocks: rideLocks.size
     }
   });
+});
+
+// Debug endpoint to check ride states
+app.get('/debug/rides', (req, res) => {
+  const rideId = req.query.rideId;
+  
+  if (rideId) {
+    const activeRide = activeRides.get(rideId);
+    const cancelledRide = cancelledRides.get(rideId);
+    
+    res.json({
+      rideId,
+      activeRide: activeRide ? {
+        status: activeRide.status,
+        driverId: activeRide.driverId,
+        userId: activeRide.userId,
+        createdAt: activeRide.createdAt
+      } : null,
+      cancelledRide: cancelledRide ? {
+        status: cancelledRide.status,
+        cancelledAt: cancelledRide.cancelledAt,
+        cancelledBy: cancelledRide.cancelledBy,
+        cancellationReason: cancelledRide.cancellationReason
+      } : null,
+      isLocked: rideLocks.has(rideId),
+      timestamp: new Date().toISOString()
+    });
+  } else {
+    res.json({
+      activeRides: Array.from(activeRides.keys()),
+      cancelledRides: Array.from(cancelledRides.keys()),
+      totalActive: activeRides.size,
+      totalCancelled: cancelledRides.size,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Debug endpoint to force cleanup a ride
+app.post('/debug/cleanup-ride/:rideId', (req, res) => {
+  const { rideId } = req.params;
+  
+  const activeRide = activeRides.get(rideId);
+  const cancelledRide = cancelledRides.get(rideId);
+  
+  if (activeRide) {
+    cleanupRide(rideId, activeRide.userId);
+    res.json({ 
+      success: true, 
+      message: `Cleaned up active ride ${rideId}`,
+      action: 'cleaned_active_ride'
+    });
+  } else if (cancelledRide) {
+    cancelledRides.delete(rideId);
+    res.json({ 
+      success: true, 
+      message: `Cleaned up cancelled ride ${rideId}`,
+      action: 'cleaned_cancelled_ride'
+    });
+  } else {
+    res.json({ 
+      success: false, 
+      message: `Ride ${rideId} not found in active or cancelled rides` 
+    });
+  }
 });
 
 // Debug endpoint
@@ -1352,22 +1427,44 @@ if (io) {
       return;
     }
     
-    // Use enhanced cancellation handler
-    const result = handleRideCancellation(data.rideId, 'DRIVER', data.reason || '');
+    // Lock the ride to prevent concurrent cancellation attempts
+    rideLocks.set(data.rideId, Date.now());
     
-    if (result.success) {
-      logEvent('DRIVER_CANCELLATION_COMPLETE', { 
-        rideId: data.rideId, 
-        cancelledBy: 'DRIVER',
-        fee: result.cancellationFee 
+    try {
+      // Use enhanced cancellation handler
+      const result = handleRideCancellation(data.rideId, 'DRIVER', data.reason || '');
+      
+      if (result.success) {
+        logEvent('DRIVER_CANCELLATION_COMPLETE', { 
+          rideId: data.rideId, 
+          cancelledBy: 'DRIVER',
+          fee: result.cancellationFee 
+        });
+        socket.emit("driver_cancellation_success", {
+          message: result.message,
+          cancellationFee: result.cancellationFee,
+          rideId: data.rideId
+        });
+      } else {
+        logEvent('DRIVER_CANCELLATION_FAILED', { rideId: data.rideId, error: result.error });
+        
+        // Send error with appropriate flags
+        socket.emit("driver_cancellation_error", { 
+          message: result.error,
+          rideId: data.rideId,
+          alreadyCancelled: result.alreadyCancelled || false,
+          notFound: result.notFound || false
+        });
+      }
+    } catch (error) {
+      logEvent('DRIVER_CANCELLATION_EXCEPTION', { rideId: data.rideId, error: error.message });
+      socket.emit("driver_cancellation_error", { 
+        message: "An error occurred while cancelling the ride",
+        rideId: data.rideId
       });
-      socket.emit("driver_cancellation_success", {
-        message: result.message,
-        cancellationFee: result.cancellationFee
-      });
-    } else {
-      logEvent('DRIVER_CANCELLATION_FAILED', { rideId: data.rideId, error: result.error });
-      socket.emit("driver_cancellation_error", { message: result.error });
+    } finally {
+      // Always release the lock
+      rideLocks.delete(data.rideId);
     }
   });
 
@@ -1928,21 +2025,41 @@ const calculateCancellationFee = (ride, cancelledBy) => {
 
 // Enhanced cancellation handler
 const handleRideCancellation = (rideId, cancelledBy, reason = '') => {
+  console.log(`🔍 Cancellation request for ride: ${rideId}, by: ${cancelledBy}`);
+  
+  // First check if ride was already cancelled
+  const cancelledRide = cancelledRides.get(rideId);
+  if (cancelledRide) {
+    console.log(`❌ Ride ${rideId} was already cancelled at ${cancelledRide.cancelledAt}`);
+    return { success: false, error: 'Ride has already been cancelled', alreadyCancelled: true };
+  }
+  
   const ride = activeRides.get(rideId);
   if (!ride) {
-    return { success: false, error: 'Ride not found' };
+    console.log(`❌ Ride ${rideId} not found in active rides`);
+    return { success: false, error: 'Ride not found', notFound: true };
+  }
+  
+  // Check if ride is already cancelled
+  if (ride.status === RIDE_STATES.CANCELLED) {
+    console.log(`❌ Ride ${rideId} status is already cancelled`);
+    return { success: false, error: 'Ride has already been cancelled', alreadyCancelled: true };
   }
   
   // Check if ride can be cancelled
   if (ride.status === RIDE_STATES.STARTED || ride.status === RIDE_STATES.COMPLETED) {
+    console.log(`❌ Ride ${rideId} cannot be cancelled at status: ${ride.status}`);
     return { success: false, error: 'Ride cannot be cancelled at this stage' };
   }
   
   // Calculate cancellation fee
   const cancellationFee = calculateCancellationFee(ride, cancelledBy);
   if (cancellationFee === null) {
+    console.log(`❌ Ride ${rideId} cannot be cancelled at this stage`);
     return { success: false, error: 'Ride cannot be cancelled at this stage' };
   }
+  
+  console.log(`✅ Proceeding with cancellation for ride: ${rideId}`);
   
   // Update ride state
   const updateResult = updateRideState(rideId, RIDE_STATES.CANCELLED, {
@@ -1953,8 +2070,21 @@ const handleRideCancellation = (rideId, cancelledBy, reason = '') => {
   });
   
   if (!updateResult.success) {
+    console.log(`❌ Failed to update ride state: ${updateResult.error}`);
     return updateResult;
   }
+  
+  // Store cancelled ride for reference
+  cancelledRides.set(rideId, {
+    ...ride,
+    status: RIDE_STATES.CANCELLED,
+    cancelledAt: Date.now(),
+    cancelledBy: cancelledBy,
+    cancellationReason: reason,
+    cancellationFee: cancellationFee
+  });
+  
+  console.log(`✅ Ride ${rideId} successfully cancelled and stored in cancelledRides`);
   
   // Notify user
   io.to(`user:${ride.userId}`).emit("ride_cancelled", {
@@ -1988,6 +2118,8 @@ const handleRideCancellation = (rideId, cancelledBy, reason = '') => {
   // Clean up
   cleanupRide(rideId, ride.userId);
   
+  console.log(`✅ Cancellation complete for ride: ${rideId}`);
+  
   return { 
     success: true, 
     cancellationFee: cancellationFee,
@@ -2019,6 +2151,19 @@ server.listen(PORT, '0.0.0.0', () => {
 server.on('error', (error) => {
   logEvent('SERVER_ERROR', { error: error.message, code: error.code });
 });
+
+// Periodic cleanup of old cancelled rides
+setInterval(() => {
+  const now = Date.now();
+  const fiveMinutesAgo = now - 300000; // 5 minutes
+  
+  for (const [rideId, ride] of cancelledRides.entries()) {
+    if (ride.cancelledAt && ride.cancelledAt < fiveMinutesAgo) {
+      cancelledRides.delete(rideId);
+      logEvent('CLEANUP_OLD_CANCELLED_RIDE', { rideId });
+    }
+  }
+}, 60000); // Run every minute
 
 // Handle process termination
 process.on('SIGTERM', () => {
