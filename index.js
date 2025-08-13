@@ -2152,8 +2152,13 @@ const handleRideCancellation = (rideId, cancelledBy, reason = '') => {
   
   console.log(`✅ Ride ${rideId} successfully cancelled and stored in cancelledRides`);
   
-  // Notify user
-  io.to(`user:${ride.userId}`).emit("ride_cancelled", {
+  // Notify user with enhanced logging
+  const userRoom = `user:${ride.userId}`;
+  console.log(`📤 Sending ride_cancelled to user room: ${userRoom}`);
+  console.log(`📊 Connected users: ${connectedUsers.size}`);
+  console.log(`🔍 User ${ride.userId} connected: ${connectedUsers.has(ride.userId)}`);
+  
+  io.to(userRoom).emit("ride_cancelled", {
     rideId: rideId,
     status: RIDE_STATES.CANCELLED,
     message: `Ride cancelled by ${cancelledBy.toLowerCase()}`,
@@ -2162,11 +2167,16 @@ const handleRideCancellation = (rideId, cancelledBy, reason = '') => {
     timestamp: Date.now()
   });
   
+  console.log(`✅ ride_cancelled event sent to user room: ${userRoom}`);
+  
   // Notify driver if ride was accepted
   if (ride.driverId) {
     resetDriverStatus(ride.driverId);
     
-    io.to(`driver:${ride.driverId}`).emit("ride_cancelled", {
+    const driverRoom = `driver:${ride.driverId}`;
+    console.log(`📤 Sending ride_cancelled to driver room: ${driverRoom}`);
+    
+    io.to(driverRoom).emit("ride_cancelled", {
       rideId: rideId,
       status: RIDE_STATES.CANCELLED,
       message: `Ride cancelled by ${cancelledBy.toLowerCase()}`,
@@ -2175,10 +2185,12 @@ const handleRideCancellation = (rideId, cancelledBy, reason = '') => {
       timestamp: Date.now()
     });
     
-    io.to(`driver:${ride.driverId}`).emit("driver_status_reset", {
+    io.to(driverRoom).emit("driver_status_reset", {
       message: "Your status has been reset to available",
       timestamp: Date.now()
     });
+    
+    console.log(`✅ ride_cancelled event sent to driver room: ${driverRoom}`);
   }
   
   // Clean up
