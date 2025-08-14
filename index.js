@@ -210,7 +210,7 @@ const connectedDrivers = new Map();
 const connectedUsers = new Map();
 
 // Track ride states and prevent race conditions
-const rideLocks = new Set();
+const rideLocks = new Map();
 const rideRequestRecipients = new Map();
 const userActiveRides = new Map();
 const rideAcceptanceAttempts = new Map();
@@ -370,7 +370,7 @@ setInterval(() => {
   let cleanedCount = 0;
   
   // Clean up stale ride locks (older than 30 seconds)
-  for (const rideId of rideLocks) {
+  for (const [rideId, lockTime] of rideLocks) {
     const ride = activeRides.get(rideId);
     if (ride && (now - ride.createdAt) > 30000) {
       logEvent('CLEANUP_STALE_LOCK', { rideId });
@@ -596,7 +596,7 @@ app.get('/debug/sockets', (req, res) => {
     connectedDrivers: Array.from(connectedDrivers.entries()),
     activeRides: Array.from(activeRides.entries()),
     userActiveRides: Array.from(userActiveRides.entries()),
-    rideLocks: Array.from(rideLocks),
+    rideLocks: Array.from(rideLocks.entries()),
     rideRequestRecipients: Array.from(rideRequestRecipients.entries()).map(([rideId, recipients]) => ({
       rideId,
       recipientCount: recipients.size,
@@ -1051,7 +1051,7 @@ if (io) {
     }
     
     // Add lock to prevent race conditions
-    rideLocks.add(data.rideId);
+    rideLocks.set(data.rideId, Date.now());
     
     try {
       // Double-check ride status after acquiring lock
@@ -1963,7 +1963,7 @@ app.get('/debug/state', (req, res) => {
     connectedDrivers: connectedDrivers.size,
     connectedUsers: connectedUsers.size,
     userActiveRides: Array.from(userActiveRides.entries()),
-    rideLocks: Array.from(rideLocks),
+    rideLocks: Array.from(rideLocks.entries()),
     rideRequestRecipients: Array.from(rideRequestRecipients.entries())
   };
   
