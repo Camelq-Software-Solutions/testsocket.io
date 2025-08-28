@@ -1740,6 +1740,36 @@ if (io) {
       logEvent('USER_DISCONNECTED', { userId: id, totalUsers: connectedUsers.size });
     }
   });
+
+  // Handle ride cancellation by driver
+  socket.on('driver_cancel_ride', (data) => {
+    logEvent('DRIVER_CANCEL_RIDE', data);
+    const result = handleRideCancellation(data.rideId, 'DRIVER', data.reason || '');
+    if (result.success) {
+      socket.emit('driver_cancellation_success', result);
+    } else {
+      socket.emit('driver_cancellation_failed', result);
+    }
+  });
+
+  // Handle ride status check
+  socket.on('check_ride_status', (data) => {
+    logEvent('CHECK_RIDE_STATUS', data);
+    const ride = activeRides.get(data.rideId);
+    if (ride) {
+      socket.emit('ride_status_response', {
+        rideId: data.rideId,
+        status: ride.status,
+        timestamp: Date.now()
+      });
+    } else {
+      socket.emit('ride_status_response', {
+        rideId: data.rideId,
+        status: 'not_found',
+        timestamp: Date.now()
+      });
+    }
+  });
   } catch (error) {
     logEvent('CONNECTION_HANDLER_ERROR', { 
       socketId: socket.id, 
