@@ -1215,11 +1215,15 @@ if (io) {
         return;
       }
       
-      // Update ride state to ACCEPTED
+      // Generate PIN code for ride confirmation
+      const pinCode = generatePinCode();
+      
+      // Update ride state to ACCEPTED with PIN code
       const updateResult = updateRideState(data.rideId, RIDE_STATES.ACCEPTED, {
         acceptedBy: data.driverId,
         driverId: data.driverId,
-        acceptedAt: Date.now()
+        acceptedAt: Date.now(),
+        pinCode: pinCode
       });
       
       if (!updateResult.success) {
@@ -1281,6 +1285,7 @@ if (io) {
         progress: data.progress || 0,
         pickupLocation: currentRide.pickup.address || currentRide.pickup.name,
         dropoffLocation: currentRide.drop.address || currentRide.drop.name,
+        pinCode: pinCode
       };
 
       sendRideProgressNotification(currentRide.userId, rideData, 'accepted');
@@ -1369,6 +1374,19 @@ if (io) {
         message: "Driver has arrived at pickup location",
         status: RIDE_STATES.ARRIVED
       });
+      
+      // Send PIN confirmation notification
+      if (updateResult.ride.pinCode && updateResult.ride.driverInfo) {
+        const rideData = {
+          rideId: data.rideId,
+          driverInfo: updateResult.ride.driverInfo,
+          pinCode: updateResult.ride.pinCode,
+          pickupLocation: updateResult.ride.pickup?.address || updateResult.ride.pickup?.name || '',
+          dropoffLocation: updateResult.ride.drop?.address || updateResult.ride.drop?.name || '',
+        };
+        
+        sendPinConfirmationNotification(updateResult.ride.userId, rideData);
+      }
       
       // Notify driver
       socket.emit("ride_status_updated", {
@@ -1743,6 +1761,149 @@ if (io) {
       logEvent('DRIVER_CANCELLATION_FAILED', { rideId: data.rideId, error: result.error });
       socket.emit("driver_cancellation_error", { message: result.error });
     }
+  });
+
+  // ========================================
+  // PIN CONFIRMATION - CUSTOMER EVENTS
+  // ========================================
+
+  // Event: Customer confirms PIN code
+  socket.on("confirm_pin", (data) => {
+    logEvent('PIN_CONFIRMATION_REQUEST', data);
+    
+    const ride = activeRides.get(data.rideId);
+    if (!ride) {
+      socket.emit("pin_confirmation_error", {
+        message: "Ride not found"
+      });
+      return;
+    }
+
+    if (ride.status !== RIDE_STATES.ARRIVED) {
+      socket.emit("pin_confirmation_error", {
+        message: "Driver has not arrived yet"
+      });
+      return;
+    }
+
+    if (data.pinCode !== ride.pinCode) {
+      logEvent('PIN_CONFIRMATION_FAILED', { rideId: data.rideId, providedPin: data.pinCode, expectedPin: ride.pinCode });
+      socket.emit("pin_confirmation_error", {
+        message: "Incorrect PIN code"
+      });
+      return;
+    }
+
+    // PIN is correct, start the ride
+    const result = updateRideState(data.rideId, RIDE_STATES.STARTED, {
+      pinConfirmedAt: Date.now(),
+      pinConfirmedBy: socket.userId
+    });
+
+    if (result.success) {
+      logEvent('PIN_CONFIRMATION_SUCCESS', { rideId: data.rideId });
+      
+      // Notify customer
+      socket.emit("pin_confirmation_success", {
+        message: "PIN confirmed successfully. Ride started!",
+        rideId: data.rideId,
+        status: RIDE_STATES.STARTED
+      });
+
+      // Notify driver
+      if (ride.driverId) {
+        io.to(`driver:${ride.driverId}`).emit("ride_started", {
+          rideId: data.rideId,
+          message: "Customer confirmed PIN. Ride started!",
+          status: RIDE_STATES.STARTED,
+          timestamp: Date.now()
+        });
+      }
+    } else {
+      socket.emit("pin_confirmation_error", {
+        message: result.error || "Failed to start ride"
+      });
+    }
+  });
+
+  // ========================================
+  // MESSAGE DRIVER - CUSTOMER EVENTS
+  // ========================================
+
+  // Event: Customer sends message to driver
+  socket.on("message_driver", (data) => {
+    logEvent('MESSAGE_DRIVER_REQUEST', data);
+    
+    const ride = activeRides.get(data.rideId);
+    if (!ride || !ride.driverId) {
+      socket.emit("message_driver_error", {
+        message: "Ride or driver not found"
+      });
+      return;
+    }
+
+    // Forward message to driver
+    io.to(`driver:${ride.driverId}`).emit("customer_message", {
+      rideId: data.rideId,
+      message: data.message,
+      customerId: socket.userId,
+      customerName: data.customerName || 'Customer',
+      timestamp: Date.now()
+    });
+
+    // Confirm message sent to customer
+    socket.emit("message_driver_success", {
+      message: "Message sent to driver",
+      rideId: data.rideId,
+      timestamp: Date.now()
+    });
+
+    logEvent('MESSAGE_DRIVER_SUCCESS', { 
+      rideId: data.rideId, 
+      driverId: ride.driverId,
+      messageLength: data.message?.length || 0
+    });
+  });
+
+  // ========================================
+  // CALL DRIVER - CUSTOMER EVENTS
+  // ========================================
+
+  // Event: Customer requests driver call info
+  socket.on("call_driver", (data) => {
+    logEvent('CALL_DRIVER_REQUEST', data);
+    
+    const ride = activeRides.get(data.rideId);
+    if (!ride || !ride.driverInfo) {
+      socket.emit("call_driver_error", {
+        message: "Ride or driver information not found"
+      });
+      return;
+    }
+
+    // Return driver contact information
+    socket.emit("call_driver_success", {
+      rideId: data.rideId,
+      driverPhone: ride.driverInfo.phone,
+      driverName: ride.driverInfo.name,
+      timestamp: Date.now()
+    });
+
+    // Notify driver that customer is calling
+    if (ride.driverId) {
+      io.to(`driver:${ride.driverId}`).emit("customer_calling", {
+        rideId: data.rideId,
+        customerId: socket.userId,
+        customerName: data.customerName || 'Customer',
+        timestamp: Date.now()
+      });
+    }
+
+    logEvent('CALL_DRIVER_SUCCESS', { 
+      rideId: data.rideId, 
+      driverId: ride.driverId,
+      driverPhone: ride.driverInfo.phone
+    });
   });
 
   // ========================================
