@@ -97,6 +97,113 @@ app.get('/test-connection', (req, res) => {
       'x-platform': req.headers['x-platform'],
       'x-environment': req.headers['x-environment'],
       'x-app-version': req.headers['x-app-version']
+    }
+  });
+});
+
+// Notification token registration endpoint
+app.post('/api/notifications/register-token', (req, res) => {
+  try {
+    const { token, platform, deviceId, userId } = req.body;
+    
+    if (!token || !platform || !deviceId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: token, platform, deviceId'
+      });
+    }
+
+    const tokenData = {
+      token,
+      platform,
+      deviceId,
+      userId,
+      timestamp: Date.now()
+    };
+
+    // Store token based on user type (customer or driver)
+    if (userId) {
+      if (!userNotificationTokens.has(userId)) {
+        userNotificationTokens.set(userId, []);
+      }
+      
+      const userTokens = userNotificationTokens.get(userId);
+      const existingTokenIndex = userTokens.findIndex(t => t.deviceId === deviceId);
+      
+      if (existingTokenIndex >= 0) {
+        userTokens[existingTokenIndex] = tokenData;
+      } else {
+        userTokens.push(tokenData);
+      }
+      
+      logEvent('NOTIFICATION_TOKEN_REGISTERED', { userId, platform, deviceId });
+    }
+
+    res.json({
+      success: true,
+      message: 'Notification token registered successfully'
+    });
+  } catch (error) {
+    console.error('❌ Error registering notification token:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
+// Notification token unregistration endpoint
+app.post('/api/notifications/unregister-token', (req, res) => {
+  try {
+    const { userId, deviceId } = req.body;
+    
+    if (!userId || !deviceId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: userId, deviceId'
+      });
+    }
+
+    if (userNotificationTokens.has(userId)) {
+      const userTokens = userNotificationTokens.get(userId);
+      const filteredTokens = userTokens.filter(t => t.deviceId !== deviceId);
+      
+      if (filteredTokens.length === 0) {
+        userNotificationTokens.delete(userId);
+      } else {
+        userNotificationTokens.set(userId, filteredTokens);
+      }
+      
+      logEvent('NOTIFICATION_TOKEN_UNREGISTERED', { userId, deviceId });
+    }
+
+    res.json({
+      success: true,
+      message: 'Notification token unregistered successfully'
+    });
+  } catch (error) {
+    console.error('❌ Error unregistering notification token:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
+// React Native connection test endpoint
+app.get('/test-connection', (req, res) => {
+  const userAgent = req.headers['user-agent'] || 'Unknown';
+  const isAPK = userAgent.includes('ReactNative-APK') || userAgent.includes('android-apk');
+  
+  res.json({
+    status: 'ok',
+    message: 'Server is reachable from React Native',
+    timestamp: new Date().toISOString(),
+    headers: {
+      'user-agent': userAgent,
+      'x-platform': req.headers['x-platform'],
+      'x-environment': req.headers['x-environment'],
+      'x-app-version': req.headers['x-app-version']
     },
     clientType: isAPK ? 'APK' : 'Expo/Development',
     recommendations: isAPK ? {
@@ -213,6 +320,17 @@ const rideAcceptanceAttempts = new Map();
 const chatMessages = new Map(); // rideId -> messages array
 const chatParticipants = new Map(); // rideId -> { userId, driverId }
 
+// Push notification tokens storage
+const userNotificationTokens = new Map(); // userId -> token data
+const driverNotificationTokens = new Map(); // driverId -> token data
+
+// Notification service configuration
+const NOTIFICATION_CONFIG = {
+  EXPO_ACCESS_TOKEN: process.env.EXPO_ACCESS_TOKEN || 'your-expo-access-token',
+  EXPO_PROJECT_ID: process.env.EXPO_PROJECT_ID || 'your-expo-project-id',
+  FCM_SERVER_KEY: process.env.FCM_SERVER_KEY || 'your-fcm-server-key',
+};
+
 // Enhanced logging with timestamps
 const logEvent = (event, data = {}) => {
   console.log(`[${new Date().toISOString()}] ${event}:`, data);
@@ -298,6 +416,137 @@ const resetDriverStatus = (driverId) => {
   return false;
 };
 
+// Notification helper functions
+const sendPushNotification = async (tokens, notificationData) => {
+  try {
+    const messages = tokens.map(token => ({
+      to: token,
+      sound: 'default',
+      priority: 'high',
+      data: notificationData.data || {},
+      notification: {
+        title: notificationData.title,
+        body: notificationData.body,
+        sound: 'default',
+        priority: 'high',
+        channelId: notificationData.channelId || 'general',
+        ...(notificationData.image && { image: notificationData.image }),
+      },
+    }));
+
+    const response = await fetch('https://exp.host/--/api/v2/push/send', {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+        'Accept-encoding': 'gzip, deflate',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(messages),
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const result = await response.json();
+    logEvent('PUSH_NOTIFICATION_SENT', { 
+      tokensCount: tokens.length, 
+      successCount: result.data?.filter(r => r.status === 'ok').length || 0,
+      errors: result.data?.filter(r => r.status === 'error') || []
+    });
+
+    return result;
+  } catch (error) {
+    console.error('❌ Error sending push notification:', error);
+    return { error: error.message };
+  }
+};
+
+const sendRideProgressNotification = async (userId, rideData, status) => {
+  const userTokens = userNotificationTokens.get(userId);
+  if (!userTokens || userTokens.length === 0) {
+    logEvent('NO_NOTIFICATION_TOKENS', { userId });
+    return;
+  }
+
+  const tokens = userTokens.map(tokenData => tokenData.token);
+  
+  let notificationData = {
+    title: '',
+    body: '',
+    data: {
+      type: 'ride_progress',
+      rideId: rideData.rideId,
+      status: status,
+      driverInfo: rideData.driverInfo,
+      eta: rideData.eta,
+      distance: rideData.distance,
+      progress: rideData.progress,
+      pickupLocation: rideData.pickupLocation,
+      dropoffLocation: rideData.dropoffLocation,
+    },
+    channelId: 'ride_progress',
+  };
+
+  switch (status) {
+    case 'accepted':
+      notificationData.title = `${rideData.driverInfo.name} accepted your ride`;
+      notificationData.body = `${rideData.driverInfo.name} • ${rideData.driverInfo.bikeNumber} • ${rideData.driverInfo.bikeModel}`;
+      break;
+    case 'en_route':
+      notificationData.title = `Pickup in ${rideData.eta}`;
+      notificationData.body = `${rideData.driverInfo.name} • ${rideData.distance} away • ${rideData.driverInfo.bikeNumber}`;
+      break;
+    case 'arrived':
+      notificationData.title = `${rideData.driverInfo.name} has arrived`;
+      notificationData.body = `${rideData.driverInfo.name} is waiting at pickup location`;
+      break;
+    case 'pickup_complete':
+      notificationData.title = 'Ride started';
+      notificationData.body = `Ride started with ${rideData.driverInfo.name}`;
+      break;
+    case 'in_progress':
+      notificationData.title = 'En route to destination';
+      notificationData.body = `En route with ${rideData.driverInfo.name}`;
+      break;
+    case 'completed':
+      notificationData.title = 'Ride completed!';
+      notificationData.body = `Your ride with ${rideData.driverInfo.name} has been completed. Fare: ₹${rideData.fare || 0}`;
+      notificationData.data.type = 'ride_completed';
+      notificationData.channelId = 'general';
+      break;
+  }
+
+  await sendPushNotification(tokens, notificationData);
+};
+
+const sendPinConfirmationNotification = async (userId, rideData) => {
+  const userTokens = userNotificationTokens.get(userId);
+  if (!userTokens || userTokens.length === 0) {
+    logEvent('NO_NOTIFICATION_TOKENS', { userId });
+    return;
+  }
+
+  const tokens = userTokens.map(tokenData => tokenData.token);
+  
+  const notificationData = {
+    title: 'Confirm Your Ride',
+    body: `Enter PIN ${rideData.pinCode} to start your ride with ${rideData.driverInfo.name}`,
+    data: {
+      type: 'pin_confirmation',
+      rideId: rideData.rideId,
+      rideProgress: rideData,
+    },
+    channelId: 'pin_confirmation',
+  };
+
+  await sendPushNotification(tokens, notificationData);
+};
+
+const generatePinCode = () => {
+  return Math.floor(1000 + Math.random() * 9000).toString();
+};
+
 // Helper function to update ride state
 const updateRideState = (rideId, newState, additionalData = {}) => {
   const ride = activeRides.get(rideId);
@@ -334,6 +583,33 @@ const updateRideState = (rideId, newState, additionalData = {}) => {
       driverId: ride.driverId,
       timestamp: Date.now()
     });
+
+    // Send push notifications for ride state changes
+    if (ride.driverInfo) {
+      const rideData = {
+        rideId: ride.rideId || rideId,
+        driverInfo: ride.driverInfo,
+        eta: ride.eta || 'Calculating...',
+        distance: ride.distance || 'Calculating...',
+        progress: ride.progress || 0,
+        pickupLocation: ride.pickup?.address || ride.pickup?.name || '',
+        dropoffLocation: ride.drop?.address || ride.drop?.name || '',
+        fare: ride.fare,
+      };
+
+      // Map ride states to notification status
+      const statusMap = {
+        [RIDE_STATES.ACCEPTED]: 'accepted',
+        [RIDE_STATES.ARRIVED]: 'arrived',
+        [RIDE_STATES.STARTED]: 'pickup_complete',
+        [RIDE_STATES.COMPLETED]: 'completed',
+      };
+
+      const notificationStatus = statusMap[newState];
+      if (notificationStatus) {
+        sendRideProgressNotification(ride.userId, rideData, notificationStatus);
+      }
+    }
   }
   
   if (ride.driverId) {
@@ -988,6 +1264,26 @@ if (io) {
         rideId: data.rideId,
         notificationData 
       });
+
+      // Send push notification for ride acceptance
+      const rideData = {
+        rideId: data.rideId,
+        driverInfo: {
+          id: data.driverId,
+          name: data.driverName || "Driver",
+          phone: data.driverPhone || "+1234567890",
+          bikeNumber: data.bikeNumber || "BIKE123",
+          bikeModel: data.bikeModel || "Hero Passion Pro",
+          rating: data.rating || 4.5,
+        },
+        eta: data.estimatedArrival || "5 minutes",
+        distance: data.distance || "2.5 km away",
+        progress: data.progress || 0,
+        pickupLocation: currentRide.pickup.address || currentRide.pickup.name,
+        dropoffLocation: currentRide.drop.address || currentRide.drop.name,
+      };
+
+      sendRideProgressNotification(currentRide.userId, rideData, 'accepted');
 
       // Send complete ride details to the accepting driver
       const safePickup = {
@@ -1740,36 +2036,6 @@ if (io) {
       logEvent('USER_DISCONNECTED', { userId: id, totalUsers: connectedUsers.size });
     }
   });
-
-  // Handle ride cancellation by driver
-  socket.on('driver_cancel_ride', (data) => {
-    logEvent('DRIVER_CANCEL_RIDE', data);
-    const result = handleRideCancellation(data.rideId, 'DRIVER', data.reason || '');
-    if (result.success) {
-      socket.emit('driver_cancellation_success', result);
-    } else {
-      socket.emit('driver_cancellation_failed', result);
-    }
-  });
-
-  // Handle ride status check
-  socket.on('check_ride_status', (data) => {
-    logEvent('CHECK_RIDE_STATUS', data);
-    const ride = activeRides.get(data.rideId);
-    if (ride) {
-      socket.emit('ride_status_response', {
-        rideId: data.rideId,
-        status: ride.status,
-        timestamp: Date.now()
-      });
-    } else {
-      socket.emit('ride_status_response', {
-        rideId: data.rideId,
-        status: 'not_found',
-        timestamp: Date.now()
-      });
-    }
-  });
   } catch (error) {
     logEvent('CONNECTION_HANDLER_ERROR', { 
       socketId: socket.id, 
@@ -2093,8 +2359,7 @@ const handleRideCancellation = (rideId, cancelledBy, reason = '') => {
   
   // Notify driver if ride was accepted
   if (ride.driverId) {
-    resetDriverStatus(ride.driverId);
-    
+    // Send cancellation events immediately
     io.to(`driver:${ride.driverId}`).emit("ride_cancelled", {
       rideId: rideId,
       status: RIDE_STATES.CANCELLED,
@@ -2104,10 +2369,15 @@ const handleRideCancellation = (rideId, cancelledBy, reason = '') => {
       timestamp: Date.now()
     });
     
-    io.to(`driver:${ride.driverId}`).emit("driver_status_reset", {
-      message: "Your status has been reset to available",
-      timestamp: Date.now()
-    });
+    // Delay the driver status reset to prevent immediate new ride requests
+    setTimeout(() => {
+      resetDriverStatus(ride.driverId);
+      
+      io.to(`driver:${ride.driverId}`).emit("driver_status_reset", {
+        message: "Your status has been reset to available",
+        timestamp: Date.now()
+      });
+    }, 3000); // 3 second delay to prevent immediate notifications
   }
   
   // Clean up
