@@ -2536,7 +2536,8 @@ const handleRideCancellation = (rideId, cancelledBy, reason = '') => {
       
       io.to(`driver:${ride.driverId}`).emit("driver_status_reset", {
         message: "Your status has been reset to available",
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        fromCancellation: true // Flag to indicate this reset is from cancellation
       });
     }, 3000); // 3 second delay to prevent immediate notifications
   }
